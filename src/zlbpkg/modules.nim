@@ -1,14 +1,28 @@
 import std/[os, strutils, algorithm]
 import ./types
 
-proc readListFile(path: string): seq[string] =
+proc parsePackageEntry(raw: string): PackageEntry =
+  ## Rozumie zarówno zwykłe nazwy pakietów jak i jawne wymuszenie
+  ## backendu zpm:
+  ##   systemd                -> PackageEntry(name: "systemd", backend: "")
+  ##   systemd -> apt          -> PackageEntry(name: "systemd", backend: "apt")
+  ##   systemd -> dnf           # dowolny backend znany zpm: apt, dnf,
+  ##                            # pacman, zypper, flatpak, snap, brew,
+  ##                            # cargo, pip, npm, own
+  var line = raw.strip()
+  if "->" in line:
+    let parts = line.split("->", maxsplit = 1)
+    return PackageEntry(name: parts[0].strip(), backend: parts[1].strip().toLowerAscii)
+  PackageEntry(name: line, backend: "")
+
+proc readListFile(path: string): seq[PackageEntry] =
   result = @[]
   if not fileExists(path): return
   for rawLine in readFile(path).splitLines:
     let line = rawLine.strip()
     if line.len == 0: continue
     if line.startsWith("#"): continue        # comments allowed
-    result.add line
+    result.add parsePackageEntry(line)
 
 proc discoverModule*(modulesRoot, name: string): ModulePackages =
   let dir = modulesRoot / name
