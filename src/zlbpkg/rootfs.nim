@@ -5,6 +5,7 @@ import ./manifest
 import ./modules
 import ./overlay
 import ./zpm
+import ./tools
 import ./janetrunner
 import ./crosscompile
 
@@ -36,7 +37,24 @@ proc bootstrapSeed(p: ProjectPaths, m: Manifest, arch: string) =
     for d in ["etc", "usr/bin", "usr/lib", "var", "boot", "home", "root", "tmp"]:
       createDir(rootfs / d)
 
+proc embedInstaller(p: ProjectPaths, m: Manifest, rootfs: string) =
+  ## Kopiuje pobrany (albo systemowy) binarny Zenith Installer do rootfsu,
+  ## tak żeby wylądował w gotowym obrazie live/ISO -- bez tego GRUB-owy
+  ## wpis "Install ..." (patrz iso.nim::writeGrubCfg) nie miałby czego
+  ## uruchomić.
+  let cacheDir = if m.tools.cacheDir.len > 0: m.tools.cacheDir else: p.cacheDir / "tools"
+  let src = cacheDir / "installer"
+  if not fileExists(src):
+    echo "==> [installer] brak pobranej binarki instalatora -- wpis GRUB \"Install\" nie zadziała"
+    return
+  let destDir = rootfs / "usr" / "local" / "bin"
+  createDir(destDir)
+  copyFileWithPermissions(src, destDir / "installer")
+  echo &"==> [installer] osadzono w {destDir / \"installer\"}"
+
 proc buildRootfs*(p: ProjectPaths, m: Manifest, projectRoot, arch: string) =
+  ensureBuildTools(p, m)
+
   echo &"==> [{arch}] bootstrapping"
   bootstrapSeed(p, m, arch)
   let rootfs = p.rootfsDir(arch)
@@ -49,19 +67,24 @@ proc buildRootfs*(p: ProjectPaths, m: Manifest, projectRoot, arch: string) =
   let mods = discoverModules(projectRoot / "modules", m.modules.includeMods)
   echo &"    {mods.len} module(s), {totalInstallCount(mods)} package(s) to install, {totalRemoveCount(mods)} to remove"
 
+  let defaultBackend = backendForBase(m)
+  echo &"==> [{arch}] default zpm backend for base '{m.distro.base}': {defaultBackend}"
+
   discard zpmInit(rootfs, projectRoot / m.keys.zpmKeyList)
 
   for md in mods:
     echo &"==> [{arch}] module '{md.name}'"
     runModuleHooks(md.janetScripts, rootfs, md.name, arch, m.distro.name, m.distro.version, hsPrePackages)
-    if not zpmInstall(rootfs, md.installList):
+    if not zpmInstall(rootfs, md.installList, defaultBackend):
       raise newException(ZlbError, &"zpm install failed for module '{md.name}'")
-    if not zpmRemove(rootfs, md.removeList):
+    if not zpmRemove(rootfs, md.removeList, defaultBackend):
       raise newException(ZlbError, &"zpm remove failed for module '{md.name}'")
     runModuleHooks(md.janetScripts, rootfs, md.name, arch, m.distro.name, m.distro.version, hsPostPackages)
 
   echo &"==> [{arch}] applying overlays"
   applyAllOverlays(projectRoot, rootfs, p.stagingDir(arch))
+
+  embedInstaller(p, m, rootfs)
 
   for md in mods:
     runModuleHooks(md.janetScripts, rootfs, md.name, arch, m.distro.name, m.distro.version, hsPostOverlay)
