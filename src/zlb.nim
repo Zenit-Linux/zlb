@@ -28,9 +28,10 @@ USAGE:
   zlb clean [--cache-only]         wipe out/ (or just out/cache/)
   zlb version                      print version
 
-ARCH may be a single target (x86_64, aarch64, riscv64), "self" for the
-host architecture, or "all" to build every arch listed in distro.hcl's
-distro { arch = [...] } block.
+ARCH may be a single target (x86_64, aarch64, riscv64, armv7, armhf,
+i686, ppc64le, s390x, loongarch64), "self" for the host architecture,
+or "all" to build every arch listed in distro.hcl's distro { arch = [...] }
+block.
 """
 
 proc findProjectRoot(): string =
