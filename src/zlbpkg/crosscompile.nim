@@ -6,8 +6,14 @@ proc hostArch*(): Arch =
     archX86_64
   elif defined(arm64):
     archAarch64
+  elif defined(arm):
+    archArmv7
   elif defined(riscv64):
     archRiscv64
+  elif defined(i386):
+    archI686
+  elif defined(powerpc64) and defined(littleEndian):
+    archPpc64le
   else:
     archX86_64
 
@@ -19,6 +25,12 @@ proc targetTriple*(a: Arch): string =
   of archX86_64:  "x86_64-zenith-linux-gnu"
   of archAarch64: "aarch64-zenith-linux-gnu"
   of archRiscv64: "riscv64-zenith-linux-gnu"
+  of archArmv7:   "armv7-zenith-linux-gnueabihf"
+  of archArmhf:   "arm-zenith-linux-gnueabihf"
+  of archI686:    "i686-zenith-linux-gnu"
+  of archPpc64le: "powerpc64le-zenith-linux-gnu"
+  of archS390x:   "s390x-zenith-linux-gnu"
+  of archLoong64: "loongarch64-zenith-linux-gnu"
   of archSelf:    targetTriple(hostArch())
 
 proc qemuBinary*(a: Arch): string =
@@ -30,6 +42,12 @@ proc qemuBinary*(a: Arch): string =
   of archX86_64:  "qemu-x86_64-static"
   of archAarch64: "qemu-aarch64-static"
   of archRiscv64: "qemu-riscv64-static"
+  of archArmv7:   "qemu-arm-static"
+  of archArmhf:   "qemu-arm-static"
+  of archI686:    "qemu-i386-static"
+  of archPpc64le: "qemu-ppc64le-static"
+  of archS390x:   "qemu-s390x-static"
+  of archLoong64: "qemu-loongarch64-static"
   of archSelf: ""
 
 proc needsEmulation*(a: Arch): bool = qemuBinary(a).len > 0
