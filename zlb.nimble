@@ -11,4 +11,4 @@ binDir        = "bin"
 requires "nim >= 2.0.0"
 
 task buildRelease, "Build optimized release binary":
-  exec "nim c -d:release --opt:speed -o:bin/zlb src/zlb.nim"
+  exec "nim c -d:release -d:ssl --opt:speed -o:bin/zlb src/zlb.nim"
