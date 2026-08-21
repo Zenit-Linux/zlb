@@ -12,9 +12,14 @@ distro {
   version  = "0.1.0"
 
   # "self" = this build bootstraps from a previously built Zenith seed
-  # (see out/cache/seeds/). Point at another distro name/tarball URL
-  # once you need a foreign bootstrap instead.
+  # (see out/cache/seeds/). Point at a foreign distro name ("fedora",
+  # "debian", "arch", "opensuse", "alpine", ...) once you need a foreign
+  # bootstrap instead -- it also picks the default zpm backend used for
+  # any package.list entry that doesn't say "-> backend" explicitly
+  # (fedora -> dnf, debian -> apt, arch -> pacman, ...). Override that
+  # derived choice explicitly with default_backend below.
   base = "self"
+  # default_backend = "apt"
 
   arch = ["x86_64", "aarch64"]
 }
@@ -50,24 +55,46 @@ workflow {
   triggers    = ["push", "tag"]
   matrix_arch = ["x86_64", "aarch64"]
 }
+
+tools {
+  # Pobierane automatycznie na starcie `zlb build ...` do out/cache/tools/
+  # (patrz zlbpkg/tools.nim) -- to jest oficjalna alternatywa dla ręcznego
+  # `curl -fsSL ... | sh` przy bootstrapowaniu zpm/instalatora w CI.
+  auto_fetch    = true
+  zpm_url       = "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm"
+  installer_url = "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer"
+}
 """
 
 const packageListTemplate = """
 # modules/core/package.list
-# One zpm package name per line. Blank lines and lines starting with
-# # are ignored. This is a placeholder list until zpm is fully
-# implemented -- `zlb build rootfs` will log what it *would* install.
+# Jeden pakiet zpm na linię. Puste linie i linie zaczynające się od #
+# są ignorowane.
+#
+# Dwie składnie:
+#   nazwa                 -- backend wybierany automatycznie na podstawie
+#                             distro.base / distro.default_backend (patrz
+#                             distro.hcl, zlbpkg/manifest.nim::backendForBase)
+#   nazwa -> backend        -- wymusza konkretny backend zpm dla TEGO
+#                             pakietu, niezależnie od domyślnego, np.:
+#                             systemd -> apt
+#                             discord -> flatpak
+#                             ripgrep -> cargo
+#                             neovim  -> brew
+#                             installer -> own   # ekosystem Zenith, bez curl
 
 base
 linux
 zenith-init
-zpm
+systemd -> apt
+zpm -> own
 """
 
 const packageRemoveTemplate = """
 # modules/core/package.remove
 # Packages to strip out after installation (e.g. build-only deps
-# pulled in transitively). One package name per line.
+# pulled in transitively). One package name per line. Supports the
+# same "nazwa -> backend" syntax as package.list.
 """
 
 const janetHookTemplate = """
