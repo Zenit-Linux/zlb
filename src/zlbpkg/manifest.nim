@@ -4,9 +4,15 @@ import ./hcl
 
 proc toArch(s: string): Arch =
   case s.toLowerAscii
-  of "x86_64", "amd64": archX86_64
+  of "x86_64", "amd64", "x64": archX86_64
   of "aarch64", "arm64": archAarch64
   of "riscv64": archRiscv64
+  of "armv7", "armv7l": archArmv7
+  of "armhf", "arm": archArmhf
+  of "i686", "x86", "i386": archI686
+  of "ppc64le", "powerpc64le": archPpc64le
+  of "s390x": archS390x
+  of "loongarch64", "loong64": archLoong64
   of "self": archSelf
   else:
     raise newException(ZlbError, "Unknown architecture in distro.hcl: '" & s & "'")
@@ -36,6 +42,7 @@ proc loadManifest*(path: string): Manifest =
   result.distro.codename = distroBlk.getStr("codename", "unnamed")
   result.distro.version = distroBlk.getStr("version", "0.0.0")
   result.distro.base = distroBlk.getStr("base", "self")
+  result.distro.defaultBackend = distroBlk.getStr("default_backend", "")
 
   let archStrs = distroBlk.getStrList("arch")
   if archStrs.len == 0:
@@ -101,6 +108,24 @@ proc loadManifest*(path: string): Manifest =
     result.workflow.triggers = @["push", "tag"]
     result.workflow.matrixArches = result.distro.arches
 
+  # ---- tools { } ------------------------------------------------------
+  # Narzędzia ekosystemu Zenith pobierane automatycznie na starcie
+  # budowania -- patrz zlbpkg/tools.nim. Domyślne URL-e wskazują na
+  # oficjalne wydania v0.1 zpm i Zenith Installer.
+  let toolsBlk = root.getBlock("tools")
+  if not toolsBlk.isNil:
+    result.tools.autoFetch = toolsBlk.getBool("auto_fetch", true)
+    result.tools.zpmUrl = toolsBlk.getStr("zpm_url",
+      "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm")
+    result.tools.installerUrl = toolsBlk.getStr("installer_url",
+      "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer")
+    result.tools.cacheDir = toolsBlk.getStr("cache_dir", "")
+  else:
+    result.tools.autoFetch = true
+    result.tools.zpmUrl = "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm"
+    result.tools.installerUrl = "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer"
+    result.tools.cacheDir = ""
+
 proc expand*(templ: string, m: Manifest, arch: string): string =
   ## Very small ${var} interpolation used for filename templates.
   result = templ
@@ -108,3 +133,20 @@ proc expand*(templ: string, m: Manifest, arch: string): string =
   result = result.replace("${codename}", m.distro.codename)
   result = result.replace("${name}", m.distro.name.toLowerAscii.replace(" ", "-"))
   result = result.replace("${arch}", arch)
+
+proc backendForBase*(m: Manifest): string =
+  ## Domyślny backend zpm dla tej dystrybucji: jawny distro.default_backend
+  ## wygrywa, inaczej wyprowadzamy go z distro.base (np. base = "fedora"
+  ## -> "dnf"). "self" (dystrybucja bootstrapuje się sama z siebie) domyślnie
+  ## korzysta z ekosystemu własnego zpm ("own") + apt jako bazowego fallbacku
+  ## dla pakietów systemowych, co dobrze pasuje do modelu "self-hosted".
+  if m.distro.defaultBackend.len > 0:
+    return m.distro.defaultBackend
+  case m.distro.base.toLowerAscii
+  of "fedora", "rhel", "centos", "rocky", "alma": "dnf"
+  of "debian", "ubuntu", "mint", "raspbian": "apt"
+  of "arch", "manjaro", "endeavouros": "pacman"
+  of "opensuse", "suse", "tumbleweed", "leap": "zypper"
+  of "alpine": "apk"
+  of "self": "apt"
+  else: "apt"
