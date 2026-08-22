@@ -1,4 +1,4 @@
-# ZLB -- Zenith Linux Builder
+# ZLB -- Zenit Linux Builder
 
 ZLB is the build tool for **Zenith Linux**: it turns a `distro.hcl`
 manifest plus a `modules/` / `overlays/` / `keys/` tree into bootable
