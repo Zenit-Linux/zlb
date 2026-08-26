@@ -22,15 +22,15 @@ proc resolveArch*(a: Arch): Arch =
 
 proc targetTriple*(a: Arch): string =
   case resolveArch(a)
-  of archX86_64:  "x86_64-zenith-linux-gnu"
-  of archAarch64: "aarch64-zenith-linux-gnu"
-  of archRiscv64: "riscv64-zenith-linux-gnu"
-  of archArmv7:   "armv7-zenith-linux-gnueabihf"
-  of archArmhf:   "arm-zenith-linux-gnueabihf"
-  of archI686:    "i686-zenith-linux-gnu"
-  of archPpc64le: "powerpc64le-zenith-linux-gnu"
-  of archS390x:   "s390x-zenith-linux-gnu"
-  of archLoong64: "loongarch64-zenith-linux-gnu"
+  of archX86_64:  "x86_64-zenit-linux-gnu"
+  of archAarch64: "aarch64-zenit-linux-gnu"
+  of archRiscv64: "riscv64-zenit-linux-gnu"
+  of archArmv7:   "armv7-zenit-linux-gnueabihf"
+  of archArmhf:   "arm-zenit-linux-gnueabihf"
+  of archI686:    "i686-zenit-linux-gnu"
+  of archPpc64le: "powerpc64le-zenit-linux-gnu"
+  of archS390x:   "s390x-zenit-linux-gnu"
+  of archLoong64: "loongarch64-zenit-linux-gnu"
   of archSelf:    targetTriple(hostArch())
 
 proc qemuBinary*(a: Arch): string =
