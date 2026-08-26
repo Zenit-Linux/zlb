@@ -8,6 +8,12 @@ var extraSearchDirs*: seq[string] = @[]
   ## into out/cache/tools -- checked before falling back to PATH so a
   ## freshly-downloaded zpm is picked up even if it isn't on PATH yet.
 
+var allowPlaceholder*: bool = false
+  ## v0.2 -- ustawiane raz przez zlbpkg/tools.nim (ensureBuildTools) z
+  ## `tools.allow_placeholder` w distro.hcl. Domyślnie FALSE: brak
+  ## realnego 'zpm' to TWARDY błąd builda (patrz runZpm), nie cichy
+  ## placeholder udający sukces.
+
 proc findZpmBinary(): string =
   for d in extraSearchDirs:
     let c = d / "zpm"
@@ -21,20 +27,50 @@ proc findZpmBinary(): string =
   return ""
 
 proc entryArg(e: PackageEntry): string =
-  ## Serializuje PackageEntry z powrotem do składni "nazwa -> backend"
-  ## rozumianej przez zpm (zpmpkg/orchestrator.nim / building.nim).
-  if e.backend.len > 0: e.name & " -> " & e.backend
-  else: e.name
+  ## Serializuje PackageEntry z powrotem do zwartej składni "nazwa ->
+  ## backend -> wariant" rozumianej przez zpm (parsePackageSpec w
+  ## zpmpkg/orchestrator.nim / building.nim). To jest jedyny punkt
+  ## styku między formatem HCL package.list (zlbpkg/modules.nim) a CLI
+  ## zpm -- zlb PARSUJE HCL, zpm NIGDY go nie widzi, dostaje tylko ten
+  ## zwarty string jako argument pozycyjny.
+  result = e.name
+  if e.backend.len > 0:
+    result &= " -> " & e.backend
+    if e.variant.len > 0:
+      result &= " -> " & e.variant
+  elif e.variant.len > 0:
+    # wariant bez jawnego backendu nie ma sensu (backend decyduje o
+    # znaczeniu wariantu: branch dla 'own', dystrybucja dla reszty) --
+    # to błąd konfiguracji wykrywany już w modules.nim, ale zabezpieczamy
+    # się tutaj drugi raz zamiast ciszej wysyłki niepoprawnej składni.
+    discard
+  if e.description.len > 0:
+    result &= " : " & e.description
 
 proc runZpm(args: seq[string]): tuple[ok: bool, output: string] =
   let bin = findZpmBinary()
   if bin.len == 0:
-    # ---- PLACEHOLDER PATH ------------------------------------------------
-    # Real zpm isn't available yet (bootstrap in zlbpkg/tools.nim failed
-    # or auto_fetch = false and it's not on PATH either). Simulate success
-    # and record intent so `zlb build` still produces a coherent,
-    # inspectable image tree.
-    let simulated = "[zpm:placeholder] would run: zpm " & args.join(" ")
+    if not allowPlaceholder:
+      # v0.2 -- ZAMYKA lukę "tryb placeholder cicho udaje sukces": brak
+      # realnego 'zpm' to teraz TWARDY błąd builda. Wcześniej ta gałąź
+      # zwracała (true, "...") niezależnie od tego, czy komenda była
+      # 'install kernel' czy 'remove --force cokolwiek' -- czyli `zlb
+      # build` mógł "zakończyć się sukcesem" i wyprodukować ISO/OCI z
+      # rootfs, w którym w rzeczywistości NIC nie zostało zainstalowane.
+      # To jest dokładnie ten rodzaj cichej porażki, którego CI/produkcja
+      # nie może sobie pozwolić przeoczyć.
+      let msg = "[zpm:FATAL] Nie znaleziono binarki 'zpm' (ani w cache narzędzi, ani na PATH) -- " &
+        "przerywam build, ponieważ 'tools.allow_placeholder' NIE jest ustawione na true w distro.hcl. " &
+        &"Komenda, która się nie wykonała: zpm {args.join(\" \")}\n" &
+        "  Napraw jedno z: (1) upewnij się, że 'tools.auto_fetch = true' i 'tools.zpm_url' wskazuje na " &
+        "działający release, (2) zainstaluj 'zpm' ręcznie i dodaj do PATH, (3) jeśli TO ŚWIADOME (np. " &
+        "inspekcja drzewa modułów bez realnej instalacji pakietów), dodaj `tools { allow_placeholder = true }` " &
+        "do distro.hcl -- każde użycie i tak zostanie głośno ostrzeżone, nie po cichu przemilczane."
+      stderr.writeLine(msg)
+      return (false, msg)
+    # ---- PLACEHOLDER PATH (świadomie włączone: tools.allow_placeholder = true) ----
+    let simulated = "[zpm:placeholder] UWAGA: tools.allow_placeholder=true -- SYMULUJĘ (nie wykonuję!): zpm " & args.join(" ")
+    stderr.writeLine(simulated)
     return (true, simulated)
   else:
     let p = startProcess(bin, args = args, options = {poUsePath, poStdErrToStdOut})
