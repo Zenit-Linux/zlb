@@ -38,7 +38,7 @@ proc bootstrapSeed(p: ProjectPaths, m: Manifest, arch: string) =
       createDir(rootfs / d)
 
 proc embedInstaller(p: ProjectPaths, m: Manifest, rootfs: string) =
-  ## Kopiuje pobrany (albo systemowy) binarny Zenith Installer do rootfsu,
+  ## Kopiuje pobrany (albo systemowy) binarny Zenit Installer do rootfsu,
   ## tak żeby wylądował w gotowym obrazie live/ISO -- bez tego GRUB-owy
   ## wpis "Install ..." (patrz iso.nim::writeGrubCfg) nie miałby czego
   ## uruchomić.
