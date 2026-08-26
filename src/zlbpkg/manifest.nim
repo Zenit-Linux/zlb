@@ -38,7 +38,7 @@ proc loadManifest*(path: string): Manifest =
   if distroBlk.isNil:
     raise newException(ZlbError, "distro.hcl is missing the required 'distro { }' block")
 
-  result.distro.name = distroBlk.getStr("name", "Zenith Linux")
+  result.distro.name = distroBlk.getStr("name", "Zenit Linux")
   result.distro.codename = distroBlk.getStr("codename", "unnamed")
   result.distro.version = distroBlk.getStr("version", "0.0.0")
   result.distro.base = distroBlk.getStr("base", "self")
@@ -63,34 +63,34 @@ proc loadManifest*(path: string): Manifest =
     result.iso.bootMode = toBootMode(isoBlk.getStr("boot_mode", "hybrid"))
     result.iso.compression = isoBlk.getStr("compression", "xz")
     result.iso.output = isoBlk.getStr("output",
-      "zenith-linux-${version}-${arch}.iso")
+      "zenit-linux-${version}-${arch}.iso")
   else:
     result.iso.bootloader = "grub"
     result.iso.bootMode = bmHybrid
     result.iso.compression = "xz"
-    result.iso.output = "zenith-linux-${version}-${arch}.iso"
+    result.iso.output = "zenit-linux-${version}-${arch}.iso"
 
   # ---- oci { } ------------------------------------------------------------
   let ociBlk = root.getBlock("oci")
   if not ociBlk.isNil:
-    result.oci.registry = ociBlk.getStr("registry", "ghcr.io/zenith-linux")
+    result.oci.registry = ociBlk.getStr("registry", "ghcr.io/zenit-linux")
     result.oci.repository = ociBlk.getStr("repository", result.distro.name.toLowerAscii.replace(" ", "-"))
     result.oci.tag = ociBlk.getStr("tag", "${version}")
-    result.oci.output = ociBlk.getStr("output", "zenith-linux-${version}-${arch}-oci")
+    result.oci.output = ociBlk.getStr("output", "zenit-linux-${version}-${arch}-oci")
   else:
-    result.oci.registry = "ghcr.io/zenith-linux"
+    result.oci.registry = "ghcr.io/zenit-linux"
     result.oci.repository = result.distro.name.toLowerAscii.replace(" ", "-")
     result.oci.tag = "${version}"
-    result.oci.output = "zenith-linux-${version}-${arch}-oci"
+    result.oci.output = "zenit-linux-${version}-${arch}-oci"
 
   # ---- keys { } -----------------------------------------------------------
   let keysBlk = root.getBlock("keys")
   if not keysBlk.isNil:
-    result.keys.gpgKey = keysBlk.getStr("gpg_key", "keys/zenith-release.asc")
+    result.keys.gpgKey = keysBlk.getStr("gpg_key", "keys/zenit-release.asc")
     result.keys.gpgKeyId = keysBlk.getStr("gpg_key_id", "")
     result.keys.zpmKeyList = keysBlk.getStr("zpm_key_list", "keys/default.hcl")
   else:
-    result.keys.gpgKey = "keys/zenith-release.asc"
+    result.keys.gpgKey = "keys/zenit-release.asc"
     result.keys.zpmKeyList = "keys/default.hcl"
 
   # ---- workflow { } ---------------------------------------------------
@@ -109,22 +109,24 @@ proc loadManifest*(path: string): Manifest =
     result.workflow.matrixArches = result.distro.arches
 
   # ---- tools { } ------------------------------------------------------
-  # Narzędzia ekosystemu Zenith pobierane automatycznie na starcie
+  # Narzędzia ekosystemu Zenit pobierane automatycznie na starcie
   # budowania -- patrz zlbpkg/tools.nim. Domyślne URL-e wskazują na
-  # oficjalne wydania v0.1 zpm i Zenith Installer.
+  # oficjalne wydania v0.1 zpm i Zenit Installer.
   let toolsBlk = root.getBlock("tools")
   if not toolsBlk.isNil:
     result.tools.autoFetch = toolsBlk.getBool("auto_fetch", true)
     result.tools.zpmUrl = toolsBlk.getStr("zpm_url",
-      "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm")
+      "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm")
     result.tools.installerUrl = toolsBlk.getStr("installer_url",
-      "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer")
+      "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer")
     result.tools.cacheDir = toolsBlk.getStr("cache_dir", "")
+    result.tools.allowPlaceholder = toolsBlk.getBool("allow_placeholder", false)
   else:
     result.tools.autoFetch = true
-    result.tools.zpmUrl = "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm"
-    result.tools.installerUrl = "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer"
+    result.tools.zpmUrl = "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm"
+    result.tools.installerUrl = "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer"
     result.tools.cacheDir = ""
+    result.tools.allowPlaceholder = false
 
 proc expand*(templ: string, m: Manifest, arch: string): string =
   ## Very small ${var} interpolation used for filename templates.
