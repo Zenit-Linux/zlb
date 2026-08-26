@@ -1,28 +1,65 @@
-import std/[os, strutils, algorithm]
+import std/[os, strutils, algorithm, strformat]
 import ./types
+import ./hcl
 
-proc parsePackageEntry(raw: string): PackageEntry =
-  ## Rozumie zarówno zwykłe nazwy pakietów jak i jawne wymuszenie
-  ## backendu zpm:
-  ##   systemd                -> PackageEntry(name: "systemd", backend: "")
-  ##   systemd -> apt          -> PackageEntry(name: "systemd", backend: "apt")
-  ##   systemd -> dnf           # dowolny backend znany zpm: apt, dnf,
-  ##                            # pacman, zypper, flatpak, snap, brew,
-  ##                            # cargo, pip, npm, own
-  var line = raw.strip()
-  if "->" in line:
-    let parts = line.split("->", maxsplit = 1)
-    return PackageEntry(name: parts[0].strip(), backend: parts[1].strip().toLowerAscii)
-  PackageEntry(name: line, backend: "")
+## v0.3 -- package.list/package.remove to teraz PLIKI HCL (zamiast
+## własnego formatu tekstowego "nazwa -> backend"), zgodnie z życzeniem:
+## "chce aby package.list mial wszystko to co wymienialem ale zamiast
+## custom formatu+text zamiast tego wole uzycie stabilnego przejrzystego
+## hcl". Gramatyka -- jeden blok `package "nazwa" { ... }` na pakiet:
+##
+##   package "base" {}
+##
+##   package "kernel" {
+##     backend     = "own"
+##     variant     = "testing"   # branch z own-repository.json (schema_version 2)
+##     description = "domyślne jądro Linux"
+##   }
+##
+##   package "git" {
+##     backend = "apt"
+##     variant = "debian.testing"   # bezpieczna instalacja cross-distro
+##   }
+##
+## Powtórzone bloki `package "x" { }` w tym samym pliku zwijają się w
+## LISTĘ (patrz `setField` w hcl.nim) -- to jest właściwość parsera HCL
+## używana już przez `module "a" { }` / `module "b" { }` w distro.hcl.
+
+proc parsePackageBlock(blk: HclValue): PackageEntry =
+  let name = blk.getStr("_label")
+  if name.len == 0:
+    raise newException(ZlbError, "blok 'package' bez etykiety (oczekiwano: package \"nazwa\" { ... })")
+  let backend = blk.getStr("backend", "")
+  let variant = blk.getStr("variant", "")
+  if variant.len > 0 and backend.len == 0:
+    raise newException(ZlbError,
+      &"package \"{name}\": pole 'variant' wymaga jawnie podanego 'backend' -- backend decyduje o " &
+      "znaczeniu wariantu (branch dla \"own\", dystrybucja dla reszty)")
+  PackageEntry(name: name, backend: backend, variant: variant,
+               description: blk.getStr("description", ""))
 
 proc readListFile(path: string): seq[PackageEntry] =
   result = @[]
   if not fileExists(path): return
-  for rawLine in readFile(path).splitLines:
-    let line = rawLine.strip()
-    if line.len == 0: continue
-    if line.startsWith("#"): continue        # comments allowed
-    result.add parsePackageEntry(line)
+  let raw = readFile(path).strip()
+  if raw.len == 0: return
+
+  var root: HclValue
+  try:
+    root = parseHcl(raw)
+  except ZlbError as e:
+    raise newException(ZlbError, &"{path}: {e.msg}")
+
+  let pkgField = root["package"]
+  if pkgField.isNil: return
+
+  if pkgField.kind == hkBlock:
+    result.add parsePackageBlock(pkgField)
+  elif pkgField.kind == hkList:
+    for item in pkgField.listVal:
+      if item.kind != hkBlock:
+        raise newException(ZlbError, &"{path}: oczekiwano bloków 'package \"nazwa\" {{ ... }}'")
+      result.add parsePackageBlock(item)
 
 proc discoverModule*(modulesRoot, name: string): ModulePackages =
   let dir = modulesRoot / name
