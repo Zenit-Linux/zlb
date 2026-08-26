@@ -10,12 +10,13 @@ import zlbpkg/ci
 import zlbpkg/keys
 import zlbpkg/scaffold
 import zlbpkg/crosscompile
+import zlbpkg/installerconfig
 
-const zlbVersion = "0.1.0"
+const zlbVersion = "0.2.0"
 
 proc usage() =
   echo """
-ZLB -- Zenith Linux Builder v""" & zlbVersion & """
+ZLB -- Zenit Linux Builder v""" & zlbVersion & """
 
 USAGE:
   zlb init [dir]                 scaffold a new distro project
@@ -23,7 +24,14 @@ USAGE:
   zlb build iso    --arch ARCH   build a bootable ISO -> out/
   zlb build oci    --arch ARCH   build an OCI image layout -> out/oci/
   zlb build all    --arch ARCH   rootfs + iso + oci in one go
+
+  --manifest=FILE   use FILE instead of distro.hcl (v0.3: alternate build
+                     profiles in the same repo, e.g. `--manifest=devcontainer.hcl`
+                     for a headless/no-GUI OCI variant -- see zenit's
+                     .github/workflows/build-devcontainer.yml)
   zlb modules list                list modules distro.hcl would include
+  zlb manifest validate            validate manifest + modules/*/package.list
+                                    (alias: `zlb validate`)
   zlb ci generate                  write CI workflow from workflow{} block
   zlb clean [--cache-only]         wipe out/ (or just out/cache/)
   zlb version                      print version
@@ -34,16 +42,31 @@ or "all" to build every arch listed in distro.hcl's distro { arch = [...] }
 block.
 """
 
-proc findProjectRoot(): string =
-  ## Walk up from cwd looking for distro.hcl, like `git rev-parse --show-toplevel`.
+proc findProjectRoot(manifestFile: string): string =
+  ## Walk up from cwd looking for `manifestFile` (domyślnie distro.hcl,
+  ## v0.3: konfigurowalne przez `--manifest=<plik>` -- pozwala na
+  ## ALTERNATYWNE profile budowania w tym samym repo, np.
+  ## `devcontainer.hcl` obok głównego `distro.hcl` -- patrz zenit
+  ## .github/workflows/build-devcontainer.yml).
   var dir = getCurrentDir()
   while true:
-    if fileExists(dir / "distro.hcl"): return dir
+    if fileExists(dir / manifestFile): return dir
     let parent = parentDir(dir)
     if parent == dir: return getCurrentDir()  # give up, let loadManifest report the error
     dir = parent
 
 proc parseFlag(args: seq[string], name: string, default: string): string =
+  ## v0.3: obsługuje OBIE składnie -- "--flag wartość" (spacja) ORAZ
+  ## "--flag=wartość" (znak równości) -- wcześniej tylko pierwsza
+  ## działała, co jest niespójne z resztą narzędzi Zenit (zpm/zpk już
+  ## akceptują obie formy) i cichym pułapem: `--manifest=devcontainer.hcl`
+  ## było po cichu IGNOROWANE (parseFlag zwracał domyślne "distro.hcl"
+  ## bez żadnego ostrzeżenia), więc CI mogło budować zupełnie inny
+  ## manifest niż zamierzony bez żadnego komunikatu o błędzie.
+  let eqPrefix = name & "="
+  for a in args:
+    if a.startsWith(eqPrefix):
+      return a[eqPrefix.len .. ^1]
   for i, a in args:
     if a == name and i + 1 < args.len: return args[i + 1]
   default
@@ -61,50 +84,98 @@ proc cmdInit(args: seq[string]) =
   let dir = if args.len > 0: args[0] else: "."
   scaffoldProject(dir)
 
-proc loadProject(): tuple[m: Manifest, root: string, paths: ProjectPaths] =
-  let root = findProjectRoot()
-  let m = loadManifest(root / "distro.hcl")
+proc loadProject(manifestFile: string = "distro.hcl"): tuple[m: Manifest, root: string, paths: ProjectPaths] =
+  let root = findProjectRoot(manifestFile)
+  let m = loadManifest(root / manifestFile)
   var p = resolveProjectPaths(root)
   ensureBaseDirs(p)
   (m, root, p)
 
-proc cmdBuildRootfs(archFlag: string) =
-  let (m, root, p) = loadProject()
+proc cmdBuildRootfs(archFlag, manifestFile: string) =
+  let (m, root, p) = loadProject(manifestFile)
   for a in resolveArches(m, archFlag):
     buildRootfs(p, m, root, a)
 
-proc cmdBuildIso(archFlag: string) =
-  let (m, root, p) = loadProject()
+proc cmdBuildIso(archFlag, manifestFile: string) =
+  let (m, root, p) = loadProject(manifestFile)
+  let installerCfg = loadInstallerConfig(root)
+  if installerCfg.present:
+    let warnings = validateInstallerBranding(root, installerCfg)
+    for w in warnings:
+      echo &"==> [installer] Ostrzeżenie: {w}"
+    echo &"==> [installer] installer/config.hcl znaleziony -- desktops={installerCfg.desktops}, " &
+      &"default_desktop='{installerCfg.defaultDesktop}', branding: icon={installerCfg.brandingIcon}, " &
+      &"banner={installerCfg.brandingBanner}"
   for a in resolveArches(m, archFlag):
     buildIsoImage(p, m, a, root / "overlays" / "branding")
     let sumsFile = p.finalPath(expand(m.iso.output, m, a)) & ".sha256"
     discard signRelease(m.keys.gpgKeyId, p.outDir, sumsFile)
 
-proc cmdBuildOci(archFlag: string) =
-  let (m, root, p) = loadProject()
+proc cmdBuildOci(archFlag, manifestFile: string) =
+  let (m, root, p) = loadProject(manifestFile)
   for a in resolveArches(m, archFlag):
     buildOciImage(p, m, a)
 
-proc cmdBuildAll(archFlag: string) =
-  let (m, root, p) = loadProject()
+proc cmdBuildAll(archFlag, manifestFile: string) =
+  let (m, root, p) = loadProject(manifestFile)
   for a in resolveArches(m, archFlag):
     buildRootfs(p, m, root, a)
     buildIsoImage(p, m, a, root / "overlays" / "branding")
     buildOciImage(p, m, a)
 
-proc cmdModulesList() =
-  let (m, root, _) = loadProject()
+proc cmdModulesList(manifestFile: string) =
+  let (m, root, _) = loadProject(manifestFile)
   let mods = discoverModules(root / "modules", m.modules.includeMods)
   echo &"{mods.len} module(s) for {m.distro.name} {m.distro.version}:"
   for md in mods:
     echo &"  - {md.name}: {md.installList.len} install, {md.removeList.len} remove, {md.janetScripts.len} janet hook(s)"
+
+proc cmdManifestValidate(manifestFile: string) =
+  ## v0.3 -- POPRAWKA: `zlb manifest validate` jest referencjonowane w
+  ## zenit/.github/workflows/setup.yml od zawsze, ale komenda NIGDY nie
+  ## istniała w zlb.nim (case dispatch znał tylko init/build/modules/
+  ## ci/clean/version/help) -- ten CI krok musiał się zawsze wywalać z
+  ## "Unknown command: manifest". Teraz naprawdę parsuje manifest +
+  ## wszystkie zadeklarowane moduły (`package.list`/`package.remove` w
+  ## formacie HCL) i wypisuje czytelne podsumowanie, kończąc kodem != 0
+  ## przy jakimkolwiek błędzie walidacji.
+  let root = findProjectRoot(manifestFile)
+  var m: Manifest
+  try:
+    m = loadManifest(root / manifestFile)
+  except ZlbError as e:
+    stderr.writeLine(&"✘ {manifestFile}: {e.msg}")
+    quit(1)
+  echo &"✔ {manifestFile}: {m.distro.name} {m.distro.version} (arch: {m.distro.arches.join(\", \")})"
+
+  var mods: seq[ModulePackages]
+  try:
+    mods = discoverModules(root / "modules", m.modules.includeMods)
+  except ZlbError as e:
+    stderr.writeLine(&"✘ moduły ({m.modules.includeMods.join(\", \")}): {e.msg}")
+    quit(1)
+  var totalPkgs = 0
+  for md in mods:
+    totalPkgs += md.installList.len
+    echo &"✔ modules/{md.name}: {md.installList.len} pakiet(ów), {md.removeList.len} do usunięcia, " &
+      &"{md.janetScripts.len} hook(ów) janet"
+  echo &"✔ Razem: {mods.len} moduł(ów), {totalPkgs} pakiet(ów) do zainstalowania."
+
+  let installerCfg = loadInstallerConfig(root)
+  if installerCfg.present:
+    let warnings = validateInstallerBranding(root, installerCfg)
+    if warnings.len == 0:
+      echo "✔ installer/config.hcl: branding OK."
+    for w in warnings:
+      echo &"⚠ installer/config.hcl: {w}"
+  echo "✔ Walidacja zakończona bez błędów."
 
 proc cmdCiGenerate() =
   let (m, root, _) = loadProject()
   generateWorkflow(m, root)
 
 proc cmdClean(cacheOnly: bool) =
-  let root = findProjectRoot()
+  let root = findProjectRoot("distro.hcl")
   let p = resolveProjectPaths(root)
   if cacheOnly:
     removeDir(p.cacheDir)
@@ -121,6 +192,7 @@ proc main() =
 
   let cmd = argv[0]
   let rest = argv[1..^1]
+  let manifestFile = parseFlag(rest, "--manifest", "distro.hcl")
 
   try:
     case cmd
@@ -131,16 +203,24 @@ proc main() =
         usage(); quit(1)
       let archFlag = parseFlag(rest, "--arch", "self")
       case rest[0]
-      of "rootfs": cmdBuildRootfs(archFlag)
-      of "iso": cmdBuildIso(archFlag)
-      of "oci": cmdBuildOci(archFlag)
-      of "all": cmdBuildAll(archFlag)
+      of "rootfs": cmdBuildRootfs(archFlag, manifestFile)
+      of "iso": cmdBuildIso(archFlag, manifestFile)
+      of "oci": cmdBuildOci(archFlag, manifestFile)
+      of "all": cmdBuildAll(archFlag, manifestFile)
       else:
         echo "Unknown build target: " & rest[0]
         usage(); quit(1)
     of "modules":
-      if rest.len > 0 and rest[0] == "list": cmdModulesList()
+      if rest.len > 0 and rest[0] == "list": cmdModulesList(manifestFile)
       else: usage(); quit(1)
+    of "manifest":
+      if rest.len > 0 and rest[0] == "validate": cmdManifestValidate(manifestFile)
+      else: usage(); quit(1)
+    of "validate":
+      # Alias wygodny z linii poleceń -- `zlb manifest validate` to
+      # nazwa "kanoniczna" (referencjonowana w istniejącym CI), ale
+      # `zlb validate` jest krótsze do ręcznego wpisania.
+      cmdManifestValidate(manifestFile)
     of "ci":
       if rest.len > 0 and rest[0] == "generate": cmdCiGenerate()
       else: usage(); quit(1)
