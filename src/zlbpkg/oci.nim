@@ -60,9 +60,9 @@ proc buildOciImage*(p: ProjectPaths, m: Manifest, arch: string) =
     "os": "linux",
     "config": {
       "Labels": {
-        "org.zenithlinux.distro": m.distro.name,
-        "org.zenithlinux.version": m.distro.version,
-        "org.zenithlinux.codename": m.distro.codename,
+        "org.zenitlinux.distro": m.distro.name,
+        "org.zenitlinux.version": m.distro.version,
+        "org.zenitlinux.codename": m.distro.codename,
       },
       "Cmd": ["/bin/sh"]
     },
