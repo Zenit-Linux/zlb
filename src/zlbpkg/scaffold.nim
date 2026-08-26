@@ -2,20 +2,20 @@ import std/[os, strutils]
 import ./types
 
 const distroHclTemplate = """
-# distro.hcl -- root manifest for this Zenith Linux build.
+# distro.hcl -- root manifest for this Zenit Linux build.
 # Read by `zlb` for every command. See `zlb manifest --help` for the
 # full block reference.
 
 distro {
-  name     = "Zenith Linux"
+  name     = "Zenit Linux"
   codename = "nova"
   version  = "0.1.0"
 
-  # "self" = this build bootstraps from a previously built Zenith seed
+  # "self" = this build bootstraps from a previously built Zenit seed
   # (see out/cache/seeds/). Point at a foreign distro name ("fedora",
   # "debian", "arch", "opensuse", "alpine", ...) once you need a foreign
   # bootstrap instead -- it also picks the default zpm backend used for
-  # any package.list entry that doesn't say "-> backend" explicitly
+  # any package.list entry that doesn't set 'backend' explicitly
   # (fedora -> dnf, debian -> apt, arch -> pacman, ...). Override that
   # derived choice explicitly with default_backend below.
   base = "self"
@@ -34,18 +34,18 @@ iso {
   bootloader  = "grub"
   boot_mode   = "hybrid"
   compression = "xz"
-  output      = "zenith-linux-${version}-${arch}.iso"
+  output      = "zenit-linux-${version}-${arch}.iso"
 }
 
 oci {
-  registry   = "ghcr.io/zenith-linux"
-  repository = "zenith-linux"
+  registry   = "ghcr.io/zenit-linux"
+  repository = "zenit-linux"
   tag        = "${version}"
-  output     = "zenith-linux-${version}-${arch}-oci"
+  output     = "zenit-linux-${version}-${arch}-oci"
 }
 
 keys {
-  gpg_key      = "keys/zenith-release.asc"
+  gpg_key      = "keys/zenit-release.asc"
   gpg_key_id   = ""
   zpm_key_list = "keys/default.hcl"
 }
@@ -61,40 +61,109 @@ tools {
   # (patrz zlbpkg/tools.nim) -- to jest oficjalna alternatywa dla ręcznego
   # `curl -fsSL ... | sh` przy bootstrapowaniu zpm/instalatora w CI.
   auto_fetch    = true
-  zpm_url       = "https://github.com/Zenith-Linux/zpm/releases/download/v0.1/zpm"
-  installer_url = "https://github.com/Zenith-Linux/installer/releases/download/v0.1/installer"
+  zpm_url       = "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm"
+  installer_url = "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer"
 }
 """
 
 const packageListTemplate = """
-# modules/core/package.list
-# Jeden pakiet zpm na linię. Puste linie i linie zaczynające się od #
-# są ignorowane.
+# modules/core/package.list -- format HCL (v0.3).
 #
-# Dwie składnie:
-#   nazwa                 -- backend wybierany automatycznie na podstawie
-#                             distro.base / distro.default_backend (patrz
-#                             distro.hcl, zlbpkg/manifest.nim::backendForBase)
-#   nazwa -> backend        -- wymusza konkretny backend zpm dla TEGO
-#                             pakietu, niezależnie od domyślnego, np.:
-#                             systemd -> apt
-#                             discord -> flatpak
-#                             ripgrep -> cargo
-#                             neovim  -> brew
-#                             installer -> own   # ekosystem Zenith, bez curl
+# Jeden blok `package "nazwa" { ... }` na pakiet. Pusty blok `{}` (albo
+# pominięcie pól) = wszystko domyślne: backend wybierany na podstawie
+# distro.base / distro.default_backend (patrz distro.hcl,
+# zlbpkg/manifest.nim::backendForBase).
+#
+# Pola dostępne w bloku `package`:
+#   backend       -- wymusza konkretny backend zpm dla TEGO pakietu:
+#                     apt, dnf, pacman, zypper, flatpak, snap, brew,
+#                     cargo, pip, npm, own.
+#   variant       -- WYMAGA jawnie podanego 'backend'. Znaczenie zależy
+#                     od backendu:
+#                       backend = "own"  -> nazwa BRANCHA z pola
+#                         "branches" w own-repository.json (schema_version
+#                         2), np. "stable" / "rolling" / "semi-rolling" /
+#                         "testing" -- albo dowolna nazwa, którą zdefiniuje
+#                         supasujące narzędzie.
+#                       backend = apt/dnf/pacman/zypper/... -> docelowa
+#                         DYSTRYBUCJA, opcjonalnie z ".suitą", np.
+#                         "debian" albo "debian.testing". Instalowane
+#                         BEZPIECZNIE, w izolowanym kontenerze (patrz
+#                         zpm/crossdistro.nim) -- NIGDY przez dopisanie
+#                         obcego repo do bazy pakietów hosta.
+#   description   -- czysto informacyjny opis (dokumentacja modułu,
+#                     wyświetlany w podsumowaniach builda).
+#
+# --- system bazowy (backend domyślny wg distro.hcl) ---
+package "base" {}
+package "linux-firmware" {}
 
-base
-linux
-zenith-init
-systemd -> apt
-zpm -> own
+# --- ekosystem Zenit, zawsze przez "own" (bez curl) ---
+package "zpm" {
+  backend     = "own"
+  description = "Zenit Package Manager -- wbudowany, domyślny"
+}
+package "installer" {
+  backend = "own"
+}
+package "kernel" {
+  backend     = "own"
+  variant     = "stable"
+  description = "domyślne jądro Linux (branch: stable)"
+}
+package "zsrv" {
+  backend     = "own"
+  description = "domyślny init system Zenit"
+}
+package "zboot" {
+  backend     = "own"
+  description = "domyślny bootloader Zenit"
+}
+
+# --- narzędzia systemowe z jawnie wybranych backendów ---
+package "systemd" {
+  backend = "apt"
+}
+package "networkmanager" {
+  backend = "apt"
+}
+package "grub" {
+  backend = "apt"
+}
+package "efibootmgr" {
+  backend = "apt"
+}
+
+# --- narzędzia dodatkowe ---
+package "htop" {
+  backend = "apt"
+}
+package "neovim" {
+  backend = "apt"
+}
+package "git" {
+  backend = "apt"
+  # przykład instalacji cross-distro: pobierz z Debiana testing zamiast
+  # z natywnych repo hosta (patrz zpm/crossdistro.nim)
+  # variant = "debian.testing"
+}
+package "ripgrep" {
+  backend = "cargo"
+}
+package "firefox" {
+  backend = "flatpak"
+}
+
+# --- pakiet bez żadnych opcji: backend/wariant wzięte z domyślnej
+#     dystrybucji/brancha zadeklarowanej w distro.hcl ---
+package "curl" {}
 """
 
 const packageRemoveTemplate = """
-# modules/core/package.remove
-# Packages to strip out after installation (e.g. build-only deps
-# pulled in transitively). One package name per line. Supports the
-# same "nazwa -> backend" syntax as package.list.
+# modules/core/package.remove -- ta sama gramatyka HCL co package.list.
+# Pakiety do usunięcia po instalacji (np. zależności potrzebne tylko do
+# budowania, dociągnięte tranzytywnie). Pola 'variant'/'description' są
+# tu dopuszczalne, ale bez znaczenia (usuwanie nie rozróżnia branchy).
 """
 
 const janetHookTemplate = """
@@ -112,7 +181,7 @@ const janetHookTemplate = """
 
 (when (= stage "post-overlay")
   (print "[core] writing /etc/hostname into " rootfs)
-  (spit (string rootfs "/etc/hostname") "zenith\n"))
+  (spit (string rootfs "/etc/hostname") "zenit\n"))
 """
 
 const defaultKeysHcl = """
@@ -121,7 +190,7 @@ const defaultKeysHcl = """
 # key_id and a pubkey path so zpm can verify signatures before install.
 
 repo "core" {
-  url    = "https://pkg.zenithlinux.org/core"
+  url    = "https://pkg.zenitlinux.org/core"
   key_id = "0xPLACEHOLDER"
   pubkey = "keys/zpm/core.asc"
 }
@@ -130,7 +199,7 @@ repo "core" {
 const readmeTemplate = """
 # {distroName}
 
-Built with ZLB (Zenith Linux Builder).
+Built with ZLB (Zenit Linux Builder).
 
 ```sh
 zlb build rootfs --arch x86_64
@@ -150,6 +219,40 @@ proc writeIfMissing(path, content: string) =
   writeFile(path, content)
   echo "  + " & path
 
+const installerConfigTemplate = """
+# installer/config.hcl -- konfiguracja Zenit Installer (PLACEHOLDER v0.3).
+#
+# UWAGA: zlb jeszcze nie zna wewnętrznego kodu źródłowego instalatora --
+# ten plik to szkielet/kontrakt wstępny (zlbpkg/installerconfig.nim),
+# rozbudowywany razem z faktyczną integracją zlb<->installer, gdy repo
+# instalatora będzie dostępne. Katalog installer/ jest OPCJONALNY --
+# usuń go, jeśli budujesz obraz bez instalatora (np. kontener serwerowy).
+
+installer {
+  # Pokazywać ekran wyboru środowiska graficznego, jeśli obraz zawiera
+  # więcej niż jedno DE/WM.
+  desktop_selector = true
+
+  # Dostępne do wyboru -- każdy MUSI mieć odpowiadający wpis w
+  # modules/*/package.list (dowolny backend).
+  desktops = ["gnome", "kde", "none"]
+  default_desktop = "gnome"
+
+  default_locale = "en_US.UTF-8"
+  locales         = ["en_US.UTF-8", "pl_PL.UTF-8"]
+
+  allow_manual_partitioning = true
+}
+
+branding {
+  # Nazwy plików WZGLĘDEM overlays/branding/ w tym repo -- overlays/branding/
+  # to źródło prawdy dla SAMYCH obrazów (distro.hcl), ten blok tylko
+  # WYBIERA które z dostarczonych plików ma pokazać instalator.
+  icon   = "icon-no-bg.png"
+  banner = "banner.png"
+}
+"""
+
 proc scaffoldProject*(dir: string) =
   createDir(dir)
 
@@ -164,18 +267,21 @@ proc scaffoldProject*(dir: string) =
   createDir(dir / "overlays" / "system" / "etc")
   writeIfMissing(dir / "overlays" / "branding" / ".gitkeep", "")
   writeIfMissing(dir / "overlays" / "home" / ".gitkeep", "")
-  writeIfMissing(dir / "overlays" / "system" / "etc" / "zenith-release",
-    "Zenith Linux (see /distro.hcl in the build repo for the source of truth)\n")
+  writeIfMissing(dir / "overlays" / "system" / "etc" / "zenit-release",
+    "Zenit Linux (see /distro.hcl in the build repo for the source of truth)\n")
 
   writeIfMissing(dir / "keys" / "default.hcl", defaultKeysHcl)
   createDir(dir / "keys" / "zpm")
+
+  createDir(dir / "installer")
+  writeIfMissing(dir / "installer" / "config.hcl", installerConfigTemplate)
 
   createDir(dir / "out" / "cache")
   writeIfMissing(dir / "out" / ".gitignore", "*\n!.gitignore\n!cache/.gitignore\n")
   writeIfMissing(dir / "out" / "cache" / ".gitignore", "*\n!.gitignore\n")
 
-  writeIfMissing(dir / "README.md", readmeTemplate.replace("{distroName}", "Zenith Linux"))
+  writeIfMissing(dir / "README.md", readmeTemplate.replace("{distroName}", "Zenit Linux"))
 
   echo ""
-  echo "Zenith Linux project scaffolded in '" & dir & "'."
+  echo "Zenit Linux project scaffolded in '" & dir & "'."
   echo "Next: cd " & dir & " && zlb build rootfs --arch x86_64"
