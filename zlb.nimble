@@ -1,6 +1,6 @@
-version       = "0.1.0"
-author        = "Zenith Linux Developers"
-description   = "ZLB - Zenith Linux Builder: ISO/OCI image builder for Zenith Linux"
+version       = "0.2.0"
+author        = "Zenit Linux Developers"
+description   = "ZLB - Zenit Linux Builder: ISO/OCI image builder for Zenit Linux"
 license       = "GPL-3.0"
 srcDir        = "src"
 bin           = @["zlb"]
