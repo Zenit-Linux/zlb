@@ -43,7 +43,7 @@ jobs:
 
       - name: Install zlb
         run: |
-          curl -fsSL https://github.com/zenith-linux/zlb/releases/latest/download/zlb-linux-x86_64 -o /usr/local/bin/zlb
+          curl -fsSL https://github.com/Zenit-Linux/zlb/releases/latest/download/zlb -o /usr/local/bin/zlb
           chmod +x /usr/local/bin/zlb
 
       - name: Cache out/cache
@@ -55,10 +55,10 @@ jobs:
             zlb-cache-${{{{ matrix.arch }}}}-
 
       - name: Import release GPG key
-        if: ${{{{ secrets.ZENITH_GPG_PRIVATE_KEY != '' }}}}
+        if: ${{{{ secrets.ZENIT_GPG_PRIVATE_KEY != '' }}}}
         env:
-          ZENITH_GPG_PRIVATE_KEY: ${{{{ secrets.ZENITH_GPG_PRIVATE_KEY }}}}
-        run: echo "$ZENITH_GPG_PRIVATE_KEY" | gpg --batch --import
+          ZENIT_GPG_PRIVATE_KEY: ${{{{ secrets.ZENIT_GPG_PRIVATE_KEY }}}}
+        run: echo "$ZENIT_GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: zlb build rootfs
         run: zlb build rootfs --arch ${{{{ matrix.arch }}}}
@@ -96,7 +96,7 @@ build:{a}:
       - out/cache/
   before_script:
     - apt-get update && apt-get install -y xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin qemu-user-static binfmt-support gnupg tar curl
-    - curl -fsSL https://github.com/zenith-linux/zlb/releases/latest/download/zlb-linux-x86_64 -o /usr/local/bin/zlb
+    - curl -fsSL https://github.com/Zenit-Linux/zlb/releases/latest/download/zlb -o /usr/local/bin/zlb
     - chmod +x /usr/local/bin/zlb
   script:
     - zlb build rootfs --arch $ZLB_ARCH
