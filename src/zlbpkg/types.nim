@@ -72,13 +72,21 @@ type
     includeMods*: seq[string]    ## names of modules/<name> dirs to include
 
   ToolsConfig* = object
-    ## tools { } -- narzędzia ekosystemu Zenith pobierane automatycznie na
+    ## tools { } -- narzędzia ekosystemu Zenit pobierane automatycznie na
     ## starcie budowania (patrz zlbpkg/tools.nim), zamiast zakładać, że są
     ## już zainstalowane na maszynie budującej / w CI.
     autoFetch*: bool          ## czy w ogóle bootstrapować (domyślnie true)
     zpmUrl*: string           ## dosłowny URL do binarki zpm
-    installerUrl*: string     ## dosłowny URL do binarki Zenith Installer
+    installerUrl*: string     ## dosłowny URL do binarki Zenit Installer
     cacheDir*: string         ## gdzie trzymać pobrane binarki (out/cache/tools domyślnie)
+    allowPlaceholder*: bool   ## v0.2 -- domyślnie FALSE. Gdy 'zpm' nie jest dostępne (ani w
+                              ## cache'u, ani na PATH, ani do pobrania), zlbpkg/zpm.nim
+                              ## domyślnie TWARDO PRZERYWA build zamiast (jak w v0.1) po
+                              ## cichu symulować sukces. Ustaw `allow_placeholder = true`
+                              ## w distro.hcl (blok tools {}), żeby świadomie wrócić do
+                              ## starego zachowania (np. do inspekcji drzewa modułów bez
+                              ## realnego zpm) -- z jawnym, głośnym ostrzeżeniem przy KAŻDYM
+                              ## użyciu, nie cichym "would run: zpm ...".
 
   Manifest* = object
     raw*: Table[string, HclValue]
@@ -106,11 +114,21 @@ type
   ## ---- module system ------------------------------------------------------
 
   PackageEntry* = object
-    ## Jeden wpis z package.list / package.remove. Obsługuje zarówno
-    ## zwykłe nazwy ("systemd") jak i jawne wymuszenie backendu zpm
-    ## ("systemd -> apt") -- patrz zlbpkg/modules.nim.
+    ## Jeden wpis z package.list / package.remove (format HCL od v0.3,
+    ## patrz zlbpkg/modules.nim). Bloki `package "nazwa" { ... }`:
+    ##   package "systemd" { backend = "apt" }
+    ##   package "kernel"  { backend = "own" variant = "testing" description = "jądro" }
+    ##   package "git"     { backend = "apt" variant = "debian.testing" }
     name*: string
     backend*: string          ## "" = domyślny backend dystrybucji
+    variant*: string          ## v0.3: "" = domyślny. Dla backend="own" -- branch
+                               ## (stable/rolling/semi-rolling/testing/...) z
+                               ## own-repository.json. Dla backendów hosta -- docelowa
+                               ## dystrybucja, opcjonalnie ".suita" (np. "debian.testing") --
+                               ## instalowana BEZPIECZNIE w izolacji (patrz zpm/crossdistro.nim),
+                               ## nigdy przez bezpośrednie dopisanie repo do hosta.
+    description*: string      ## v0.3: czysto informacyjny opis (dokumentacja modułu,
+                               ## wyświetlany w podsumowaniach builda) -- nieużywany do logiki
 
   ModulePackages* = object
     name*: string
@@ -124,3 +142,28 @@ type
     brandingDir*: string
     homeDir*: string
     systemDir*: string
+
+  ## ---- installer/ (v0.3 -- PLACEHOLDER, patrz zlbpkg/installerconfig.nim) --
+
+  InstallerConfig* = object
+    ## Sparsowana zawartość installer/config.hcl. PLACEHOLDER: zlb nie zna
+    ## jeszcze wewnętrznego kodu źródłowego Zenit Installer -- ten typ i
+    ## jego parser to wstępny kontrakt, rozbudowywany razem z faktyczną
+    ## integracją zlb<->installer, gdy repo instalatora będzie dostępne
+    ## do wglądu. Pola poniżej to NAJBARDZIEJ prawdopodobne opcje na
+    ## podstawie tego, co już wiadomo (wybór środowiska graficznego,
+    ## lokalizacja, branding) -- traktuj jako punkt wyjścia, nie kontrakt
+    ## ostateczny.
+    present*: bool                  ## czy installer/config.hcl w ogóle istnieje w projekcie
+    desktopSelector*: bool          ## pokazywać ekran wyboru środowiska graficznego
+    desktops*: seq[string]          ## dostępne DE/WM (każdy MUSI mieć wpis w package.list)
+    defaultDesktop*: string
+    defaultLocale*: string
+    locales*: seq[string]
+    allowManualPartitioning*: bool
+    brandingIcon*: string           ## nazwa pliku WZGLĘDEM overlays/branding/ (nie ścieżka
+                                     ## absolutna -- overlays/branding/ to źródło prawdy dla
+                                     ## SAMYCH plików, installer/config.hcl tylko WYBIERA które
+                                     ## z nich użyć, zgodnie z tym, co ustalono: "uzytkownik tez
+                                     ## decyduje w distro.hcl i installer.hcl")
+    brandingBanner*: string
