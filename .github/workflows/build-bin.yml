@@ -1,1 +1,83 @@
+name: Build & Release zlb binary
 
+# v0.2 -- ten plik był DOTĄD CAŁKOWICIE PUSTY (0 bajtów treści poza jedną
+# pustą linią). Efekt: nie istniało ŻADNE CI publikujące binarkę `zlb` do
+# GitHub Releases, mimo że:
+#   - `zlbpkg/ci.nim` (generator workflow'ów DLA DYSTRYBUCJI zbudowanych
+#     przez zlb, np. Zenit) generował/generuje kroki `curl .../zlb/
+#     releases/latest/download/zlb` -- ten URL był od początku martwy;
+#   - już wygenerowane workflowy w repo `zenit` (`.github/workflows/*.yml`)
+#     robiły dokładnie to samo pobranie.
+# Ten workflow domyka pętlę: publikuje binarkę pod NAZWĄ ASSETU "zlb"
+# (bez sufiksu architektury -- zgodnie z konwencją, której już używały
+# `zlbpkg/manifest.nim`/`scaffold.nim` dla zpm: `.../releases/download/
+# v<wersja>/zlb`), więc zarówno `releases/latest/download/zlb`, jak i
+# wersja przypięta `releases/download/vX.Y/zlb` (oba warianty poprawne
+# -- pierwszy zawsze najnowszy, drugi deterministyczny) działają bez
+# dalszych zmian po stronie konsumentów (zenit i inne dystrybucje oparte
+# o zlb).
+#
+# UWAGA architektura: buduje TYLKO linux/x86_64 (matchuje runner
+# `ubuntu-latest`). Jeśli w przyszłości zajdzie potrzeba wsparcia innych
+# architektur (aarch64 itd.), trzeba dodać osobne assety z sufiksem arch
+# (np. "zlb-aarch64") i odpowiednio zaktualizować konsumentów -- świadomie
+# NIE robimy tego teraz, żeby nie komplikować URL-a ponad to, co user
+# jawnie zażyczył ("zlb" bez sufiksu).
+
+on:
+  push:
+    tags:
+      - "v*.*"
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.0"
+
+      - name: Zależności systemowe budowania obrazów
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin \
+            qemu-user-static binfmt-support gnupg tar
+
+      - name: nimble install (zależności)
+        run: nimble install -d -y
+
+      - name: Buduje binarkę release (nimble buildRelease)
+        run: nimble buildRelease
+
+      - name: Sanity-check
+        run: |
+          ./bin/zlb --version || ./bin/zlb --help
+
+      - name: Suma sha256
+        run: sha256sum bin/zlb > bin/zlb.sha256
+
+      - name: Publikuj w GitHub Releases jako asset "zlb"
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/zlb
+            bin/zlb.sha256
+          generate_release_notes: true
+
+      - name: Artefakt roboczy (dla workflow_dispatch bez taga)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: zlb-linux-x86_64
+          path: |
+            bin/zlb
+            bin/zlb.sha256
