@@ -33,7 +33,7 @@ proc applyHomeOverlay*(ov: OverlayPaths, rootfs: string) =
 
 proc stageBranding*(ov: OverlayPaths, stagingDir: string) =
   ## Branding assets aren't part of the rootfs itself -- they're staged
-  ## next to the ISO build tree so the installer (Zenith Installer) can
+  ## next to the ISO build tree so the installer (Zenit Installer) can
   ## pick them up at boot time.
   copyTree(ov.brandingDir, stagingDir / "branding")
 
