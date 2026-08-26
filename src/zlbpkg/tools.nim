@@ -36,6 +36,11 @@ proc ensureTool(cacheDir, name, url: string): bool =
 
 proc ensureBuildTools*(p: ProjectPaths, m: Manifest) =
   ## Wywoływane na samym początku każdej komendy `zlb build ...`.
+  zpmwrap.allowPlaceholder = m.tools.allowPlaceholder
+  if m.tools.allowPlaceholder:
+    echo "==> [tools] UWAGA: tools.allow_placeholder=true -- brak realnego 'zpm' NIE przerwie builda " &
+      "(instalacje pakietów zostaną tylko zasymulowane, głośno ostrzegane przy każdym użyciu)"
+
   if not m.tools.autoFetch:
     echo "==> [tools] auto_fetch = false w distro.hcl -- pomijam bootstrap narzędzi"
     return
