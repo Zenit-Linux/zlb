@@ -1,6 +1,6 @@
 # ZLB -- Zenit Linux Builder
 
-ZLB is the build tool for **Zenith Linux**: it turns a `distro.hcl`
+ZLB is the build tool for **Zenit Linux**: it turns a `distro.hcl`
 manifest plus a `modules/` / `overlays/` / `keys/` tree into bootable
 ISO images and OCI (container) images, with cross-architecture builds
 and generated CI workflows.
@@ -54,7 +54,7 @@ overlays/
 
 keys/
   default.hcl                zpm trust store (repo "name" { url, key_id, pubkey })
-  zenith-release.asc         GPG key used to sign SHA256SUMS
+  zenit-release.asc         GPG key used to sign SHA256SUMS
 
 out/                        FINAL images only
 out/cache/                  reusable build state (rootfs, seeds, scratch)
@@ -64,10 +64,10 @@ out/cache/                  reusable build state (rootfs, seeds, scratch)
 
 ```hcl
 distro {
-  name     = "Zenith Linux"
+  name     = "Zenit Linux"
   codename = "nova"
   version  = "0.1.0"
-  base     = "self"                    # bootstraps from a Zenith seed
+  base     = "self"                    # bootstraps from a Zenit seed
   arch     = ["x86_64", "aarch64"]
 }
 
@@ -79,17 +79,17 @@ iso {
   bootloader  = "grub"
   boot_mode   = "hybrid"
   compression = "xz"
-  output      = "zenith-linux-${version}-${arch}.iso"
+  output      = "zenit-linux-${version}-${arch}.iso"
 }
 
 oci {
-  registry   = "ghcr.io/zenith-linux"
-  repository = "zenith-linux"
+  registry   = "ghcr.io/zenit-linux"
+  repository = "zenit-linux"
   tag        = "${version}"
 }
 
 keys {
-  gpg_key      = "keys/zenith-release.asc"
+  gpg_key      = "keys/zenit-release.asc"
   zpm_key_list = "keys/default.hcl"
 }
 
@@ -107,7 +107,7 @@ intentional, manifests stay easy to diff and hand-edit.
 ## Self-hosted bootstrap
 
 `distro.base = "self"` means a given arch's build bootstraps from a
-Zenith rootfs tarball *previously built by ZLB itself*
+Zenit rootfs tarball *previously built by ZLB itself*
 (`out/cache/seeds/<arch>-<version>.tar.zst`). The very first build for
 a fresh arch has no seed yet, so ZLB falls back to a minimal empty
 skeleton and lets the module pipeline (zpm + janet hooks) populate it
@@ -125,7 +125,7 @@ Nothing extra needed in `distro.hcl` beyond listing the arch.
 
 ## zpm (placeholder)
 
-`zpm`, Zenith's own package manager, isn't finished yet. Every call
+`zpm`, Zenit's own package manager, isn't finished yet. Every call
 in `zlbpkg/zpm.nim` shells out to a real `zpm` binary if one is found
 on PATH; otherwise it logs exactly what it *would* run and continues,
 so `zlb build` stays fully exercisable end-to-end today. Swapping in
