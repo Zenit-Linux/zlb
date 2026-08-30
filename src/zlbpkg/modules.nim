@@ -84,6 +84,41 @@ proc discoverModule*(modulesRoot, name: string): ModulePackages =
   # deterministic execution order (e.g. 10-x.janet before 20-y.janet)
   result.janetScripts.sort(cmp[string])
 
+proc resolveToolsetProfile*(cfg: ToolsetConfig, cliOverride: string): ToolsetProfile =
+  ## `cliOverride` to wartość `--toolset=<gnu|zenit>` z linii poleceń (pusty
+  ## string = brak flagi -> użyj `cfg.profile` z distro.hcl). Rzuca
+  ## `ZlbError`, jeśli ktoś poda `--toolset` mimo `toolset.allow_override
+  ## = false` w distro.hcl -- to świadomy wybór dystrybucji, żeby CI/
+  ## pipeline nie mogło po cichu zbudować "niewłaściwego" wariantu.
+  if cliOverride.len == 0:
+    return cfg.profile
+  if not cfg.allowOverride:
+    raise newException(ZlbError,
+      "--toolset zostało podane, ale distro.hcl ma toolset.allow_override = false " &
+      "-- ta dystrybucja świadomie nie pozwala nadpisywać profilu narzędzi z linii poleceń")
+  case cliOverride.toLowerAscii
+  of "gnu": tpGnu
+  of "zenit", "own": tpZenit
+  else:
+    raise newException(ZlbError,
+      "--toolset='" & cliOverride & "' nieznany -- oczekiwano \"gnu\" albo \"zenit\"")
+
+proc resolveToolsetModule*(cfg: ToolsetConfig, profile: ToolsetProfile): string =
+  case profile
+  of tpGnu: cfg.gnuModule
+  of tpZenit: cfg.zenitModule
+
+proc withToolset*(includeMods: seq[string], toolsetModule: string): seq[string] =
+  ## Dopisuje moduł toolsetu do `modules.include`, chyba że dystrybucja
+  ## już go tam jawnie wymienia (pełna kontrola ręczna wygrywa) albo lista
+  ## jest pusta (czyli "buduj wszystko co jest w modules/" -- toolset i
+  ## tak zostanie znaleziony przez katalogowe skanowanie w
+  ## `discoverModules`, dopisywanie go jawnie tylko zduplikowałoby wpis).
+  if includeMods.len == 0 or toolsetModule in includeMods:
+    return includeMods
+  result = includeMods
+  result.add toolsetModule
+
 proc discoverModules*(modulesRoot: string, includeMods: seq[string]): seq[ModulePackages] =
   result = @[]
   if includeMods.len == 0:
