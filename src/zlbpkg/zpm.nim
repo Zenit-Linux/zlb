@@ -9,10 +9,11 @@ var extraSearchDirs*: seq[string] = @[]
   ## freshly-downloaded zpm is picked up even if it isn't on PATH yet.
 
 var allowPlaceholder*: bool = false
-  ## v0.2 -- ustawiane raz przez zlbpkg/tools.nim (ensureBuildTools) z
-  ## `tools.allow_placeholder` w distro.hcl. Domyślnie FALSE: brak
-  ## realnego 'zpm' to TWARDY błąd builda (patrz runZpm), nie cichy
-  ## placeholder udający sukces.
+  ## Ustawiane raz przez zlbpkg/tools.nim (ensureBuildTools) na podstawie
+  ## flagi CLI `--allow-placeholder` (NIE distro.hcl -- to per-uruchomienie
+  ## decyzja, nie własność dystrybucji). Domyślnie FALSE: brak realnego
+  ## 'zpm' to TWARDY błąd builda (patrz runZpm), nie cichy placeholder
+  ## udający sukces.
 
 proc findZpmBinary(): string =
   for d in extraSearchDirs:
@@ -60,12 +61,12 @@ proc runZpm(args: seq[string]): tuple[ok: bool, output: string] =
       # To jest dokładnie ten rodzaj cichej porażki, którego CI/produkcja
       # nie może sobie pozwolić przeoczyć.
       let msg = "[zpm:FATAL] Nie znaleziono binarki 'zpm' (ani w cache narzędzi, ani na PATH) -- " &
-        "przerywam build, ponieważ 'tools.allow_placeholder' NIE jest ustawione na true w distro.hcl. " &
+        "przerywam build, ponieważ flaga --allow-placeholder NIE została podana. " &
         &"Komenda, która się nie wykonała: zpm {args.join(\" \")}\n" &
-        "  Napraw jedno z: (1) upewnij się, że 'tools.auto_fetch = true' i 'tools.zpm_url' wskazuje na " &
-        "działający release, (2) zainstaluj 'zpm' ręcznie i dodaj do PATH, (3) jeśli TO ŚWIADOME (np. " &
-        "inspekcja drzewa modułów bez realnej instalacji pakietów), dodaj `tools { allow_placeholder = true }` " &
-        "do distro.hcl -- każde użycie i tak zostanie głośno ostrzeżone, nie po cichu przemilczane."
+        "  Napraw jedno z: (1) upewnij się, że masz połączenie internetowe -- zlb sam pobierze " &
+        "najnowsze zpm z GitHuba, (2) zainstaluj 'zpm' ręcznie i dodaj do PATH, (3) jeśli TO ŚWIADOME " &
+        "(np. inspekcja drzewa modułów bez realnej instalacji pakietów), uruchom z `--allow-placeholder` " &
+        "-- każde użycie i tak zostanie głośno ostrzeżone, nie po cichu przemilczane."
       stderr.writeLine(msg)
       return (false, msg)
     # ---- PLACEHOLDER PATH (świadomie włączone: tools.allow_placeholder = true) ----
