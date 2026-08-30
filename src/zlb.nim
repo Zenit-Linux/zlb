@@ -12,7 +12,7 @@ import zlbpkg/scaffold
 import zlbpkg/crosscompile
 import zlbpkg/installerconfig
 
-const zlbVersion = "0.2.0"
+const zlbVersion = "0.3.0"
 
 proc usage() =
   echo """
@@ -25,10 +25,19 @@ USAGE:
   zlb build oci    --arch ARCH   build an OCI image layout -> out/oci/
   zlb build all    --arch ARCH   rootfs + iso + oci in one go
 
-  --manifest=FILE   use FILE instead of distro.hcl (v0.3: alternate build
-                     profiles in the same repo, e.g. `--manifest=devcontainer.hcl`
-                     for a headless/no-GUI OCI variant -- see zenit's
-                     .github/workflows/build-devcontainer.yml)
+  --manifest=FILE   use FILE instead of distro.hcl (alternate build profiles,
+                     conventionally under profiles/, e.g.
+                     `--manifest=profiles/server.hcl` -- see zenit's
+                     .github/workflows/build-server.yml)
+  --toolset=NAME    override toolset.profile from distro.hcl for this build
+                    only ("gnu" or "zenit" -- see distro.hcl's toolset { }
+                    block; requires toolset.allow_override != false).
+                    Only affects `zlb build rootfs`/`zlb build all`.
+  --allow-placeholder  don't fail the build if 'zpm' can't be found or
+                    downloaded -- simulate package installs instead (loudly
+                    warned on every use). For inspecting the module tree
+                    without a real zpm available, never for real releases.
+                    Only affects `zlb build rootfs`/`zlb build all`.
   zlb modules list                list modules distro.hcl would include
   zlb manifest validate            validate manifest + modules/*/package.list
                                     (alias: `zlb validate`)
@@ -71,6 +80,12 @@ proc parseFlag(args: seq[string], name: string, default: string): string =
     if a == name and i + 1 < args.len: return args[i + 1]
   default
 
+proc hasFlag(args: seq[string], name: string): bool =
+  ## Bezargumentowa flaga bool (np. `--allow-placeholder`) -- obecność w
+  ## `args` znaczy true, brak znaczy false. W przeciwieństwie do
+  ## `parseFlag` nie oczekuje żadnej wartości po fladze.
+  name in args
+
 proc resolveArches(m: Manifest, archFlag: string): seq[string] =
   if archFlag == "all":
     for a in m.distro.arches:
@@ -91,15 +106,19 @@ proc loadProject(manifestFile: string = "distro.hcl"): tuple[m: Manifest, root: 
   ensureBaseDirs(p)
   (m, root, p)
 
-proc cmdBuildRootfs(archFlag, manifestFile: string) =
+proc cmdBuildRootfs(archFlag, manifestFile, toolsetFlag: string, allowPlaceholder: bool) =
   let (m, root, p) = loadProject(manifestFile)
   for a in resolveArches(m, archFlag):
-    buildRootfs(p, m, root, a)
+    buildRootfs(p, m, root, a, toolsetFlag, allowPlaceholder)
 
 proc cmdBuildIso(archFlag, manifestFile: string) =
   let (m, root, p) = loadProject(manifestFile)
   let installerCfg = loadInstallerConfig(root)
   if installerCfg.present:
+    let desktopErrors = validateDesktops(root, installerCfg)
+    if desktopErrors.len > 0:
+      for e in desktopErrors: stderr.writeLine(&"✘ [installer] {e}")
+      raise newException(ZlbError, "installer/config.hcl wymienia środowisko(a) graficzne bez odpowiadającego modułu -- popraw modules/desktop-<id>/ albo installer.desktops")
     let warnings = validateInstallerBranding(root, installerCfg)
     for w in warnings:
       echo &"==> [installer] Ostrzeżenie: {w}"
@@ -116,10 +135,10 @@ proc cmdBuildOci(archFlag, manifestFile: string) =
   for a in resolveArches(m, archFlag):
     buildOciImage(p, m, a)
 
-proc cmdBuildAll(archFlag, manifestFile: string) =
+proc cmdBuildAll(archFlag, manifestFile, toolsetFlag: string, allowPlaceholder: bool) =
   let (m, root, p) = loadProject(manifestFile)
   for a in resolveArches(m, archFlag):
-    buildRootfs(p, m, root, a)
+    buildRootfs(p, m, root, a, toolsetFlag, allowPlaceholder)
     buildIsoImage(p, m, a, root / "overlays" / "branding")
     buildOciImage(p, m, a)
 
@@ -163,11 +182,16 @@ proc cmdManifestValidate(manifestFile: string) =
 
   let installerCfg = loadInstallerConfig(root)
   if installerCfg.present:
+    let desktopErrors = validateDesktops(root, installerCfg)
+    for e in desktopErrors:
+      stderr.writeLine(&"✘ installer/config.hcl: {e}")
     let warnings = validateInstallerBranding(root, installerCfg)
     if warnings.len == 0:
       echo "✔ installer/config.hcl: branding OK."
     for w in warnings:
       echo &"⚠ installer/config.hcl: {w}"
+    if desktopErrors.len > 0:
+      quit(1)
   echo "✔ Walidacja zakończona bez błędów."
 
 proc cmdCiGenerate() =
@@ -202,11 +226,13 @@ proc main() =
       if rest.len == 0:
         usage(); quit(1)
       let archFlag = parseFlag(rest, "--arch", "self")
+      let toolsetFlag = parseFlag(rest, "--toolset", "")
+      let allowPlaceholder = hasFlag(rest, "--allow-placeholder")
       case rest[0]
-      of "rootfs": cmdBuildRootfs(archFlag, manifestFile)
+      of "rootfs": cmdBuildRootfs(archFlag, manifestFile, toolsetFlag, allowPlaceholder)
       of "iso": cmdBuildIso(archFlag, manifestFile)
       of "oci": cmdBuildOci(archFlag, manifestFile)
-      of "all": cmdBuildAll(archFlag, manifestFile)
+      of "all": cmdBuildAll(archFlag, manifestFile, toolsetFlag, allowPlaceholder)
       else:
         echo "Unknown build target: " & rest[0]
         usage(); quit(1)
