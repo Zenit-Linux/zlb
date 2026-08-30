@@ -56,14 +56,13 @@ workflow {
   matrix_arch = ["x86_64", "aarch64"]
 }
 
-tools {
-  # Pobierane automatycznie na starcie `zlb build ...` do out/cache/tools/
-  # (patrz zlbpkg/tools.nim) -- to jest oficjalna alternatywa dla ręcznego
-  # `curl -fsSL ... | sh` przy bootstrapowaniu zpm/instalatora w CI.
-  auto_fetch    = true
-  zpm_url       = "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm"
-  installer_url = "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer"
-}
+# Brak bloku tools { } -- zlb sam wie, skąd pobrać najnowsze zpm
+# (`zlbpkg/tools.nim::DefaultZpmReleaseUrl`, stały alias GitHuba
+# "/releases/latest/download/zpm"). Instalator zainstalujesz w rootfs
+# przez zwykły wpis w package.list: `package "installer" { backend =
+# "own" }` (patrz modules/core/package.list niżej) -- to samo zpm, które
+# zlb pobrało, wykona `zpm install installer` w ramach normalnej
+# instalacji pakietów modułu.
 """
 
 const packageListTemplate = """
