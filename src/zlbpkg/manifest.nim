@@ -108,25 +108,45 @@ proc loadManifest*(path: string): Manifest =
     result.workflow.triggers = @["push", "tag"]
     result.workflow.matrixArches = result.distro.arches
 
-  # ---- tools { } ------------------------------------------------------
-  # Narzędzia ekosystemu Zenit pobierane automatycznie na starcie
-  # budowania -- patrz zlbpkg/tools.nim. Domyślne URL-e wskazują na
-  # oficjalne wydania v0.1 zpm i Zenit Installer.
-  let toolsBlk = root.getBlock("tools")
-  if not toolsBlk.isNil:
-    result.tools.autoFetch = toolsBlk.getBool("auto_fetch", true)
-    result.tools.zpmUrl = toolsBlk.getStr("zpm_url",
-      "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm")
-    result.tools.installerUrl = toolsBlk.getStr("installer_url",
-      "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer")
-    result.tools.cacheDir = toolsBlk.getStr("cache_dir", "")
-    result.tools.allowPlaceholder = toolsBlk.getBool("allow_placeholder", false)
+  # ---- tools { } (USUNIĘTE, v0.4) ----------------------------------------
+  # Ta sekcja HCL już nie istnieje -- zlb sam wie, skąd pobrać najnowsze
+  # zpm (stały alias GitHuba "/releases/latest/download/zpm", patrz
+  # zlbpkg/tools.nim::DefaultZpmReleaseUrl), a `installer` jest instalowany
+  # przez zpm jako zwykły pakiet ekosystemu `own` (`zpm install installer`,
+  # patrz `package "installer" { backend = "own" }` w modules/core/
+  # package.list dystrybucji) -- nie ma już żadnego osobnego mechanizmu do
+  # skonfigurowania. Jeśli ktoś ma stary `distro.hcl` z blokiem `tools {}`,
+  # jest on po prostu IGNOROWANY (parser HCL nie wywala się na nieznanych
+  # blokach najwyższego poziomu) -- `zlb manifest validate` w przyszłości
+  # mogłoby o tym ostrzegać, na razie milczące pominięcie jest świadomym
+  # kompromisem (nie chcemy failować buildów z powodu resztek starego pola).
+
+  # ---- toolset { } ------------------------------------------------------
+  # Wybór między klasycznym GNU coreutils/util-linux/... (backend apt) a
+  # własnymi, minimalnymi narzędziami Zenit (backend own, patrz
+  # zenit-base/tools/) -- "user tez decyduje w distro.hcl czy wolny od
+  # GNU a miec narzedzia od zenit". `zlb build --toolset=<gnu|zenit>`
+  # nadpisuje ten wybór w danym buildzie, jeśli `allow_override = true`
+  # (domyślnie tak) -- patrz `resolveToolsetProfile` w modules.nim.
+  let toolsetBlk = root.getBlock("toolset")
+  if not toolsetBlk.isNil:
+    let profileStr = toolsetBlk.getStr("profile", "gnu").toLowerAscii
+    result.toolset.profile =
+      case profileStr
+      of "zenit", "own": tpZenit
+      of "gnu", "": tpGnu
+      else:
+        raise newException(ZlbError,
+          "distro.hcl: toolset.profile '" & profileStr &
+          "' nieznany -- oczekiwano \"gnu\" albo \"zenit\"")
+    result.toolset.allowOverride = toolsetBlk.getBool("allow_override", true)
+    result.toolset.gnuModule = toolsetBlk.getStr("gnu_module", "toolset-gnu")
+    result.toolset.zenitModule = toolsetBlk.getStr("zenit_module", "toolset-zenit")
   else:
-    result.tools.autoFetch = true
-    result.tools.zpmUrl = "https://github.com/Zenit-Linux/zpm/releases/download/v0.1/zpm"
-    result.tools.installerUrl = "https://github.com/Zenit-Linux/installer/releases/download/v0.1/installer"
-    result.tools.cacheDir = ""
-    result.tools.allowPlaceholder = false
+    result.toolset.profile = tpGnu
+    result.toolset.allowOverride = true
+    result.toolset.gnuModule = "toolset-gnu"
+    result.toolset.zenitModule = "toolset-zenit"
 
 proc expand*(templ: string, m: Manifest, arch: string): string =
   ## Very small ${var} interpolation used for filename templates.
