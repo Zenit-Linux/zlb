@@ -9,6 +9,7 @@ binDir        = "bin"
 # Dependencies
 
 requires "nim >= 2.0.0"
+requires "hcl_nim >= 0.1"
 
 task buildRelease, "Build optimized release binary":
   exec "nim c -d:release -d:ssl --opt:speed -o:bin/zlb src/zlb.nim"
