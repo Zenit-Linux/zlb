@@ -1,5 +1,14 @@
 import std/tables
 export tables
+## `HclValue`/`HclKind` (razem z polami wariantowymi hkString/hkNumber/
+## hkBool/hkList/hkBlock) NIE są już zdefiniowane w tym pliku -- pochodzą
+## ze wspólnej biblioteki `hcl-nim` (patrz `./hclnim.nim`, skopiowany 1:1
+## z repo `hcl-nim`). Re-eksportowane tutaj, żeby `Manifest.raw:
+## Table[string, HclValue]` niżej i reszta zlb (manifest.nim, modules.nim,
+## keys.nim, installerconfig.nim) mogły dalej pisać po prostu
+## `HclValue`/`hkBlock`/... bez importowania `hclnim` osobno.
+import ./hclnim
+export hclnim.HclValue, hclnim.HclKind
 
 type
   ZlbError* = object of CatchableError
@@ -71,23 +80,6 @@ type
   ModulesConfig* = object
     includeMods*: seq[string]    ## names of modules/<name> dirs to include
 
-  ToolsConfig* = object
-    ## tools { } -- narzędzia ekosystemu Zenit pobierane automatycznie na
-    ## starcie budowania (patrz zlbpkg/tools.nim), zamiast zakładać, że są
-    ## już zainstalowane na maszynie budującej / w CI.
-    autoFetch*: bool          ## czy w ogóle bootstrapować (domyślnie true)
-    zpmUrl*: string           ## dosłowny URL do binarki zpm
-    installerUrl*: string     ## dosłowny URL do binarki Zenit Installer
-    cacheDir*: string         ## gdzie trzymać pobrane binarki (out/cache/tools domyślnie)
-    allowPlaceholder*: bool   ## v0.2 -- domyślnie FALSE. Gdy 'zpm' nie jest dostępne (ani w
-                              ## cache'u, ani na PATH, ani do pobrania), zlbpkg/zpm.nim
-                              ## domyślnie TWARDO PRZERYWA build zamiast (jak w v0.1) po
-                              ## cichu symulować sukces. Ustaw `allow_placeholder = true`
-                              ## w distro.hcl (blok tools {}), żeby świadomie wrócić do
-                              ## starego zachowania (np. do inspekcji drzewa modułów bez
-                              ## realnego zpm) -- z jawnym, głośnym ostrzeżeniem przy KAŻDYM
-                              ## użyciu, nie cichym "would run: zpm ...".
-
   Manifest* = object
     raw*: Table[string, HclValue]
     distro*: DistroInfo
@@ -96,20 +88,26 @@ type
     oci*: OciConfig
     keys*: KeysConfig
     workflow*: WorkflowConfig
-    tools*: ToolsConfig
+    toolset*: ToolsetConfig
 
-  ## ---- minimal HCL AST ---------------------------------------------------
+  ## ---- toolset (GNU coreutils vs. własne narzędzia Zenit) ----------------
 
-  HclKind* = enum
-    hkString, hkNumber, hkBool, hkList, hkBlock
+  ToolsetProfile* = enum
+    ## Które narzędzia bazowe (odpowiedniki coreutils/dopasowane 1:1 do
+    ## krótkich nazw w zenit-base/tools/) trafiają do obrazu. Patrz
+    ## `zenit-base/tools/README.md` -- każde narzędzie tam (wm, rm, un,
+    ## pm, ro, zb, ni, en, xa, so, sz, pf, lb, up, wp, pr, fr, cr, sp, id,
+    ## hn, zdb, kt, dl, df, gr, echo, kp, mk, wz, zn, about, ar, ow, du)
+    ## odpowiada jednemu klasycznemu narzędziu GNU -- profil decyduje,
+    ## KTÓRA implementacja tego zestawu trafia do obrazu, nie czy w ogóle.
+    tpGnu   = "gnu"     ## klasyczny GNU coreutils/util-linux/... (backend apt)
+    tpZenit = "zenit"   ## własne, minimalne narzędzia Zenit (backend own)
 
-  HclValue* = ref object
-    case kind*: HclKind
-    of hkString: strVal*: string
-    of hkNumber: numVal*: float
-    of hkBool:   boolVal*: bool
-    of hkList:   listVal*: seq[HclValue]
-    of hkBlock:  fields*: OrderedTableRef[string, HclValue]
+  ToolsetConfig* = object
+    profile*: ToolsetProfile      ## domyślny profil z distro.hcl (blok toolset {})
+    allowOverride*: bool           ## czy `zlb build --toolset=...` może nadpisać profil
+    gnuModule*: string              ## nazwa modułu z package.list dla profilu gnu
+    zenitModule*: string             ## nazwa modułu z package.list dla profilu zenit
 
   ## ---- module system ------------------------------------------------------
 
@@ -143,27 +141,42 @@ type
     homeDir*: string
     systemDir*: string
 
-  ## ---- installer/ (v0.3 -- PLACEHOLDER, patrz zlbpkg/installerconfig.nim) --
+  ## ---- installer/ ----------------------------------------------------------
+  ## v0.4: przestało być placeholderem -- zlb zna teraz źródło Zenit
+  ## Installer (repo `installer`) i faktycznie EMBEDUJE tę konfigurację
+  ## (oraz pliki brandingu, które wskazuje) do rootfs pod
+  ## `/etc/zenit/installer/config.hcl` i `/usr/share/zenit/branding/`
+  ## (patrz `embedInstallerConfig` w tym module i wywołanie z
+  ## rootfs.nim). Instalator czyta ten sam plik w trakcie działania
+  ## (patrz `installerpkg/config.nim` w repo `installer`) tym samym
+  ## parserem `hcl-nim` -- więc wybór środowisk/lokalizacji faktycznie
+  ## dociera do kreatora, zamiast być tylko udokumentowaną konwencją.
 
   InstallerConfig* = object
-    ## Sparsowana zawartość installer/config.hcl. PLACEHOLDER: zlb nie zna
-    ## jeszcze wewnętrznego kodu źródłowego Zenit Installer -- ten typ i
-    ## jego parser to wstępny kontrakt, rozbudowywany razem z faktyczną
-    ## integracją zlb<->installer, gdy repo instalatora będzie dostępne
-    ## do wglądu. Pola poniżej to NAJBARDZIEJ prawdopodobne opcje na
-    ## podstawie tego, co już wiadomo (wybór środowiska graficznego,
-    ## lokalizacja, branding) -- traktuj jako punkt wyjścia, nie kontrakt
-    ## ostateczny.
     present*: bool                  ## czy installer/config.hcl w ogóle istnieje w projekcie
     desktopSelector*: bool          ## pokazywać ekran wyboru środowiska graficznego
-    desktops*: seq[string]          ## dostępne DE/WM (każdy MUSI mieć wpis w package.list)
+    desktops*: seq[string]          ## dostępne DE/WM -- każdy (poza "none") MUSI mieć
+                                     ## odpowiadający katalog modules/desktop-<id>/
+                                     ## (patrz validateInstallerBranding/validateDesktops)
     defaultDesktop*: string
     defaultLocale*: string
     locales*: seq[string]
     allowManualPartitioning*: bool
-    brandingIcon*: string           ## nazwa pliku WZGLĘDEM overlays/branding/ (nie ścieżka
-                                     ## absolutna -- overlays/branding/ to źródło prawdy dla
-                                     ## SAMYCH plików, installer/config.hcl tylko WYBIERA które
-                                     ## z nich użyć, zgodnie z tym, co ustalono: "uzytkownik tez
-                                     ## decyduje w distro.hcl i installer.hcl")
+    title*: string                   ## nazwa produktu pokazywana w kreatorze
+                                       ## (installer.title w config.hcl); puste = użyj distro.name
+    brandingIcon*: string            ## nazwa pliku WZGLĘDEM overlays/branding/ (nie ścieżka
+                                      ## absolutna -- overlays/branding/ to źródło prawdy dla
+                                      ## SAMYCH plików, installer/config.hcl tylko WYBIERA które
+                                      ## z nich użyć)
     brandingBanner*: string
+
+const
+  InstallerEmbeddedConfigPath* = "etc/zenit/installer/config.hcl"
+    ## Ścieżka WZGLĘDEM roota rootfs (bez wiodącego '/') pod którą
+    ## `embedInstallerConfig` kopiuje `installer/config.hcl` -- ta sama
+    ## ścieżka (z wiodącym '/') jest wpisana na stałe w
+    ## `installerpkg/config.nim` w repo `installer`. Zmiana tej stałej w
+    ## jednym repo bez drugiego to rozjazd -- stąd nazwa eksportowana, nie
+    ## zakopana w ciele funkcji.
+  InstallerEmbeddedBrandingDir* = "usr/share/zenit/branding"
+    ## Jw., dla plików wskazanych przez branding.icon/branding.banner.
