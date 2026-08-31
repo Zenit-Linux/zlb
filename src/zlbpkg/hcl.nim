@@ -1,5 +1,5 @@
 import ./types
-import ./hclnim as impl
+import ./hclcore as impl
 
 export impl.`[]`, impl.getStr, impl.getBool, impl.getInt, impl.getFloat,
        impl.getStrList, impl.getBlock, impl.getBlocks, impl.findBlock,
