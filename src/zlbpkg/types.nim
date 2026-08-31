@@ -2,13 +2,15 @@ import std/tables
 export tables
 ## `HclValue`/`HclKind` (razem z polami wariantowymi hkString/hkNumber/
 ## hkBool/hkList/hkBlock) NIE są już zdefiniowane w tym pliku -- pochodzą
-## ze wspólnej biblioteki `hcl-nim` (patrz `./hclnim.nim`, skopiowany 1:1
-## z repo `hcl-nim`). Re-eksportowane tutaj, żeby `Manifest.raw:
-## Table[string, HclValue]` niżej i reszta zlb (manifest.nim, modules.nim,
-## keys.nim, installerconfig.nim) mogły dalej pisać po prostu
-## `HclValue`/`hkBlock`/... bez importowania `hclnim` osobno.
-import ./hclnim
-export hclnim.HclValue, hclnim.HclKind
+## z cienkiej nakładki `./hclcore.nim` na wspólną bibliotekę `hcl-nim`
+## (paczka nimble `hcl_nim`, patrz `hclcore.nim` po pełne wyjaśnienie i
+## dlaczego ta nakładka NIE mogła się dalej nazywać `hclnim.nim`).
+## Re-eksportowane tutaj, żeby `Manifest.raw: Table[string, HclValue]`
+## niżej i reszta zlb (manifest.nim, modules.nim, keys.nim,
+## installerconfig.nim) mogły dalej pisać po prostu `HclValue`/`hkBlock`/
+## ... bez importowania `hclcore` osobno.
+import ./hclcore
+export hclcore.HclValue, hclcore.HclKind
 
 type
   ZlbError* = object of CatchableError
