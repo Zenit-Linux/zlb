@@ -1,4 +1,5 @@
-import std/[strutils, tables]
+import std/tables
+import hclnim as real
 
 type
   HclError* = object of CatchableError
@@ -15,210 +16,121 @@ type
     of hkList:   listVal*: seq[HclValue]
     of hkBlock:  fields*: OrderedTable[string, HclValue]
 
-# ---------------------------------------------------------------------------
-# Tokenizer -- śledzi numer linii dla czytelnych komunikatów błędów.
-# ---------------------------------------------------------------------------
-
-type
-  TokKind = enum
-    tkIdent, tkString, tkNumber, tkBool
-    tkLBrace, tkRBrace, tkLBrack, tkRBrack
-    tkEq, tkComma, tkEof
-
-  Token = object
-    kind: TokKind
-    text: string
-    line: int
-
-proc err(line: int, msg: string): ref HclError =
-  result = newException(HclError, (if line > 0: "linia " & $line & ": " else: "") & msg)
-  result.line = line
-
-proc tokenize(src: string): seq[Token] =
-  result = @[]
-  var i = 0
-  let n = src.len
-  var line = 1
-  while i < n:
-    let c = src[i]
-    if c == '\n':
-      inc line; inc i
-    elif c in {' ', '\t', '\r'}:
-      inc i
-    elif c == '#' or (c == '/' and i+1 < n and src[i+1] == '/'):
-      while i < n and src[i] != '\n': inc i
-    elif c == '/' and i+1 < n and src[i+1] == '*':
-      i += 2
-      while i+1 < n and not (src[i] == '*' and src[i+1] == '/'):
-        if src[i] == '\n': inc line
-        inc i
-      if i+1 >= n:
-        raise err(line, "niezamknięty komentarz blokowy '/*' (brak zamykającego '*/')")
-      i += 2
-    elif c == '"':
-      let startLine = line
-      var j = i + 1
-      var s = ""
-      var closed = false
-      while j < n:
-        if src[j] == '\n':
-          break  # string nie może przechodzić przez koniec linii bez escape'a
-        if src[j] == '\\' and j+1 < n:
-          let nx = src[j+1]
-          case nx
-          of 'n': s.add '\n'
-          of 't': s.add '\t'
-          of '"': s.add '"'
-          of '\\': s.add '\\'
-          else: s.add nx
-          j += 2
-        elif src[j] == '"':
-          closed = true
-          break
-        else:
-          s.add src[j]
-          inc j
-      if not closed:
-        raise err(startLine, "niedomknięty string (brakujący końcowy '\"')")
-      result.add Token(kind: tkString, text: s, line: startLine)
-      i = j + 1
-    elif c == '{':
-      result.add Token(kind: tkLBrace, text: "{", line: line); inc i
-    elif c == '}':
-      result.add Token(kind: tkRBrace, text: "}", line: line); inc i
-    elif c == '[':
-      result.add Token(kind: tkLBrack, text: "[", line: line); inc i
-    elif c == ']':
-      result.add Token(kind: tkRBrack, text: "]", line: line); inc i
-    elif c == '=':
-      result.add Token(kind: tkEq, text: "=", line: line); inc i
-    elif c == ',':
-      result.add Token(kind: tkComma, text: ",", line: line); inc i
-    elif c.isDigit or (c == '-' and i+1 < n and src[i+1].isDigit):
-      var j = i
-      if src[j] == '-': inc j
-      while j < n and (src[j].isDigit or src[j] == '.'): inc j
-      result.add Token(kind: tkNumber, text: src[i..<j], line: line)
-      i = j
-    elif c.isAlphaAscii or c == '_':
-      var j = i
-      while j < n and (src[j].isAlphaNumeric or src[j] == '_' or src[j] == '-' or src[j] == '.'):
-        inc j
-      let word = src[i..<j]
-      if word == "true" or word == "false":
-        result.add Token(kind: tkBool, text: word, line: line)
-      else:
-        result.add Token(kind: tkIdent, text: word, line: line)
-      i = j
-    else:
-      # Nieznany znak: pomijany, nie fatalny -- manifesty mają zostać
-      # łatwe do ręcznej edycji nawet z drobnym błędem interpunkcyjnym
-      # w komentarzu spoza `#`/`//`.
-      inc i
-  result.add Token(kind: tkEof, text: "", line: line)
-
-# ---------------------------------------------------------------------------
-# Parser
-# ---------------------------------------------------------------------------
-
-type Parser = object
-  toks: seq[Token]
-  pos: int
-
-proc cur(p: Parser): Token = p.toks[p.pos]
-proc advance(p: var Parser): Token =
-  result = p.toks[p.pos]
-  if p.pos < p.toks.high: inc p.pos
-
-proc expect(p: var Parser, k: TokKind, ctx: string) =
-  if p.cur.kind != k:
-    raise err(p.cur.line, "oczekiwano innego tokenu w " & ctx & ", napotkano '" & p.cur.text & "'")
-  discard p.advance()
-
 proc newBlock(): HclValue =
   HclValue(kind: hkBlock, fields: initOrderedTable[string, HclValue]())
 
-proc parseValue(p: var Parser): HclValue
-
-proc parseList(p: var Parser): HclValue =
-  result = HclValue(kind: hkList, listVal: @[])
-  expect(p, tkLBrack, "liście")
-  while p.cur.kind != tkRBrack:
-    if p.cur.kind == tkEof:
-      raise err(p.cur.line, "niedomknięta lista (brakujący końcowy ']')")
-    result.listVal.add parseValue(p)
-    if p.cur.kind == tkComma: discard p.advance()
-  expect(p, tkRBrack, "liście")
-
-proc parseValue(p: var Parser): HclValue =
-  case p.cur.kind
-  of tkString:
-    result = HclValue(kind: hkString, strVal: p.cur.text)
-    discard p.advance()
-  of tkNumber:
-    result = HclValue(kind: hkNumber, numVal: parseFloat(p.cur.text))
-    discard p.advance()
-  of tkBool:
-    result = HclValue(kind: hkBool, boolVal: p.cur.text == "true")
-    discard p.advance()
-  of tkLBrack:
-    result = parseList(p)
-  else:
-    raise err(p.cur.line, "oczekiwano wartości (string/liczba/true|false/lista), napotkano '" & p.cur.text & "'")
-
 proc setField(blk: HclValue, key: string, val: HclValue) =
-  ## Powtórzone klucze (np. wiele bloków `package "x" {}`) kolapsują w
-  ## listę -- patrz `getBlocks`/`getBlock` (ten ostatni zwraca pierwszy).
+  ## Powtórzone klucze (np. wiele bloków `package "x" {}`, albo wiele
+  ## `module "a" {}` / `module "b" {}`) kolapsują w listę -- patrz
+  ## `getBlocks`/`getBlock` (ten ostatni zwraca surową wartość, czyli dla
+  ## powtórzonych kluczy `kind == hkList`, tak jak w dawnym własnym
+  ## parserze). Zachowanie identyczne z poprzednią (ręcznie pisaną)
+  ## implementacją -- testy (`tests/test_core.nim` w zlb, "powtórzone
+  ## klucze bloków zwijają się w listę") się na to nie zmieniły.
   if blk.fields.hasKey(key):
     let existing = blk.fields[key]
     if existing.kind == hkList and existing.listVal.len > 0 and existing.listVal[0].kind == hkBlock:
+      ## Trzeci (i kolejny) blok pod tym samym kluczem -- DOPISZ do już
+      ## istniejącej listy zamiast zawijać ją w kolejną listę (to była
+      ## luka względem starego, ręcznie pisanego parsera -- bez tej
+      ## gałęzi 3+ powtórzone bloki zagnieżdżały listy zamiast się
+      ## spłaszczać, patrz `tests/test_core.nim`, "parsuje package.list
+      ## z blokami HCL", 3 bloki `package`).
       existing.listVal.add val
-    elif existing.kind == hkBlock and val.kind == hkBlock:
-      blk.fields[key] = HclValue(kind: hkList, listVal: @[existing, val])
     else:
       blk.fields[key] = HclValue(kind: hkList, listVal: @[existing, val])
   else:
     blk.fields[key] = val
 
-proc parseBlockBody(p: var Parser): HclValue =
+# ---------------------------------------------------------------------------
+# Konwersja realnego AST (hclnim.HclNode) na HclValue
+# ---------------------------------------------------------------------------
+
+proc valueFromNode(n: real.HclNode): HclValue =
+  case n.kind
+  of real.nkString:
+    result = HclValue(kind: hkString, strVal: n.strVal)
+  of real.nkNumber:
+    ## `numVal` jest zawsze wypełnione przez prawdziwą bibliotekę -- także
+    ## dla liczb całkowitych (`newIntNode` ustawia `numVal: i.float`) --
+    ## więc nie trzeba tu rozróżniać `isInt`.
+    result = HclValue(kind: hkNumber, numVal: n.numVal)
+  of real.nkBool:
+    result = HclValue(kind: hkBool, boolVal: n.boolVal)
+  of real.nkNull:
+    ## `null` nie występował w starym, ręcznie pisanym parserze (gramatyka
+    ## dotychczasowych plików .hcl w tym projekcie go nie używa) -- żeby
+    ## nie wywalać się na czymś, co teraz realny parser już rozumie,
+    ## reprezentujemy go jako pusty string (taki sam "brak wartości",
+    ## jaki dawał wcześniej brakujący klucz przez `getStr(..., default)`).
+    result = HclValue(kind: hkString, strVal: "")
+  of real.nkList:
+    var items: seq[HclValue] = @[]
+    for it in n.items: items.add valueFromNode(it)
+    result = HclValue(kind: hkList, listVal: items)
+  of real.nkObject:
+    ## Obiekt inline `{ key = val, ... }` używany jako WARTOŚĆ (nie blok)
+    ## -- traktujemy go jak blok, żeby dało się użyć tych samych
+    ## akcesorów (getStr/getBool/...) na jego polach, gdyby kiedyś któryś
+    ## z plików .hcl w tym projekcie zaczął go używać. Dotychczasowe
+    ## pliki .hcl tego projektu tego nie robią (używają prawdziwych
+    ## bloków `name { ... }`, nie `name = { ... }`).
+    result = newBlock()
+    for (k, v) in n.fields:
+      setField(result, k, valueFromNode(v))
+  of real.nkHeredoc:
+    result = HclValue(kind: hkString, strVal: n.heredocText)
+  of real.nkExpr:
+    ## Wyrażenia HCL2 (referencje/funkcje/interpolacje poza zwykłym
+    ## stringiem) -- żaden plik .hcl tego projektu ich nie używa (patrz
+    ## `getStr`, który operuje na literałach), ale zamiast się wywalać,
+    ## oddajemy surowy tekst źródłowy, tak samo jak biblioteka robi to
+    ## sama w `toJson`/`` `$` ``.
+    result = HclValue(kind: hkString, strVal: n.exprSrc)
+  else:
+    raise newException(HclError, "nieoczekiwany typ węzła HCL jako wartość")
+
+proc bodyToBlock(items: seq[real.HclNode]): HclValue =
   result = newBlock()
-  while p.cur.kind == tkIdent:
-    let name = p.advance().text
-    if p.cur.kind == tkString:
-      # blok z etykietą: name "label" { ... } (etykieta trafia do
-      # syntetycznego pola "_label", patrz `label()`)
-      let label = p.advance().text
-      expect(p, tkLBrace, "bloku '" & name & "'")
-      var inner = parseBlockBody(p)
-      expect(p, tkRBrace, "bloku '" & name & "'")
-      inner.fields["_label"] = HclValue(kind: hkString, strVal: label)
-      setField(result, name, inner)
-    elif p.cur.kind == tkLBrace:
-      discard p.advance()
-      var inner = parseBlockBody(p)
-      expect(p, tkRBrace, "bloku '" & name & "'")
-      setField(result, name, inner)
-    elif p.cur.kind == tkEq:
-      discard p.advance()
-      let val = parseValue(p)
-      setField(result, name, val)
+  for item in items:
+    case item.kind
+    of real.nkAttribute:
+      setField(result, item.name, valueFromNode(item.value))
+    of real.nkBlock:
+      var inner = bodyToBlock(item.blockBody)
+      if item.labels.len > 0:
+        ## Tylko pierwsza etykieta -- dotychczasowy format (`repo "x" {}`,
+        ## `module "x" {}`, `package "x" {}`) używa co najwyżej jednej.
+        inner.fields["_label"] = HclValue(kind: hkString, strVal: item.labels[0])
+      setField(result, item.blockType, inner)
     else:
-      raise err(p.cur.line, "oczekiwano '=' albo '{' po '" & name & "'")
-  if p.cur.kind notin {tkRBrace, tkEof}:
-    raise err(p.cur.line, "nieoczekiwany token '" & p.cur.text & "' (oczekiwano identyfikatora, '}' albo końca pliku)")
+      discard  # nkDocument/nkAttribute.value itd. nie występują na tym poziomie
 
 proc parseHcl*(src: string): HclValue =
-  ## Parsuje cały dokument, zwracając wirtualny blok główny (root) --
-  ## jego `fields` to atrybuty/bloki najwyższego poziomu. Rzuca `HclError`
-  ## (z numerem linii w `.line` i w treści `.msg`) przy niedomkniętym
-  ## bloku/stringu/liście albo nierozpoznanym tokenie.
-  var p = Parser(toks: tokenize(src), pos: 0)
-  result = parseBlockBody(p)
-  if p.cur.kind != tkEof:
-    raise err(p.cur.line, "nadmiarowy '}' bez odpowiadającego otwarcia")
+  ## Parsuje dokument HCL PRAWDZIWĄ biblioteką hcl-nim (`real.parseHcl`),
+  ## zwracając wirtualny blok główny (root) -- jego `fields` to
+  ## atrybuty/bloki najwyższego poziomu, dokładnie jak wcześniej. Rzuca
+  ## `HclError` (z numerem linii w `.line`, o ile biblioteka go poda) przy
+  ## błędzie leksykalnym/składniowym.
+  var doc: real.HclNode
+  try:
+    doc = real.parseHcl(src)
+  except real.HclLexError as e:
+    var ex = newException(HclError, e.msg)
+    ex.line = e.line
+    raise ex
+  except real.HclParseError as e:
+    var ex = newException(HclError, e.msg)
+    ex.line = e.line
+    raise ex
+  except real.HclError as e:
+    var ex = newException(HclError, e.msg)
+    ex.line = 0
+    raise ex
+  bodyToBlock(doc.body)
 
 # ---------------------------------------------------------------------------
-# Akcesory wygodne -- wspólne dla zpm/zlb/installer
+# Akcesory wygodne -- wspólne dla zpm/zlb/installer (niezmienione API)
 # ---------------------------------------------------------------------------
 
 proc `[]`*(v: HclValue, key: string): HclValue =
@@ -276,17 +188,11 @@ proc getBlock*(v: HclValue, key: string): HclValue {.inline.} =
   ## `kind == hkList`, którą wywołujący musi rozpoznać sam (tak jak robi
   ## to np. `zlbpkg/modules.nim`), albo użyć `getBlocks` poniżej, która
   ## zawsze zwraca `seq[HclValue]` niezależnie od tego, czy pod kluczem
-  ## był jeden blok, wiele, czy żaden. Ta funkcja celowo NIE unwrapuje
-  ## automatycznie do "pierwszego bloku" -- to złamałoby dotychczasowe
-  ## zachowanie zlb (`getBlock` == dawne `` `[]` ``), na którym opiera się
-  ## test "powtórzone klucze bloków zwijają się w listę".
+  ## był jeden blok, wiele, czy żaden.
   v[key]
 
 proc findBlock*(v: HclValue, key: string): HclValue {.inline.} =
-  ## Alias `getBlock` -- nazwa używana historycznie w zpm. UWAGA: w zpm
-  ## `findBlock` był zawsze wołany dla kluczy, które w praktyce mają co
-  ## najwyżej jeden blok (np. `security { }`, `custom { }`) -- ten sam
-  ## brak unwrappingu co w `getBlock` nie jest tam obserwowalny.
+  ## Alias `getBlock` -- nazwa używana historycznie w zpm.
   getBlock(v, key)
 
 proc getBlocks*(v: HclValue, key: string): seq[HclValue] =
