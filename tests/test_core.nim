@@ -121,6 +121,27 @@ suite "manifest (loadManifest)":
     check "Zenit-Linux/zpm" in tools.DefaultZpmReleaseUrl
     check "/releases/latest/download/" in tools.DefaultZpmReleaseUrl
 
+  test "pickLatestTagFromReleasesJson: bierze tag_name pierwszego wpisu (najnowszy, nawet pre-release)":
+    # Kształt odpowiedzi GitHub REST API `GET /repos/{owner}/{repo}/releases`
+    # -- lista posortowana od najnowszego, BEZ filtrowania prerelease/draft
+    # (w przeciwieństwie do aliasu ".../releases/latest", który je pomija).
+    let json = """
+      [
+        {"tag_name": "v0.1", "prerelease": true, "draft": false},
+        {"tag_name": "v0.0.9", "prerelease": false, "draft": false}
+      ]
+    """
+    check tools.pickLatestTagFromReleasesJson(json) == "v0.1"
+
+  test "pickLatestTagFromReleasesJson: pusta lista releasów -> \"\"":
+    check tools.pickLatestTagFromReleasesJson("[]") == ""
+
+  test "pickLatestTagFromReleasesJson: błędny JSON -> \"\" (nie rzuca wyjątku)":
+    check tools.pickLatestTagFromReleasesJson("nie jest jsonem {{{") == ""
+
+  test "pickLatestTagFromReleasesJson: pusty string -> \"\"":
+    check tools.pickLatestTagFromReleasesJson("") == ""
+
 suite "modules (package.list w formacie HCL -- v0.3)":
   test "parsuje package.list z blokami HCL":
     let dir = createTempDir("zlbtest", "")
