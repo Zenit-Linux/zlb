@@ -1,4 +1,4 @@
-import std/[os, strformat]
+import std/[os, strformat, json, osproc]
 import ./paths
 import ./zpm as zpmwrap
 
@@ -21,12 +21,27 @@ import ./zpm as zpmwrap
 ## GitHuba" w tym pliku -- to była zbędna duplikacja tej samej ścieżki
 ## dostawy, którą i tak zapewnia zpm.
 
+const
+  zpmOwner = "Zenit-Linux"
+  zpmRepoName = "zpm"
+
 const DefaultZpmReleaseUrl* =
-  "https://github.com/Zenit-Linux/zpm/releases/latest/download/zpm"
+  &"https://github.com/{zpmOwner}/{zpmRepoName}/releases/latest/download/zpm"
   ## `/releases/latest/download/<nazwa>` to stały alias GitHuba, który
-  ## ZAWSZE wskazuje na najnowsze wydanie -- w przeciwieństwie do URL-a
+  ## ZWYKLE wskazuje na najnowsze wydanie -- w przeciwieństwie do URL-a
   ## przypiętego do konkretnego tagu (np. `/v0.1/`), nie wymaga ręcznej
   ## aktualizacji w kodzie zlb przy każdym nowym wydaniu zpm.
+  ##
+  ## PUŁAPKA (NAPRAWIONE poniżej w `ensureZpm`): ten alias ZAWSZE pomija
+  ## release'y oznaczone jako "pre-release" albo "draft" -- to zachowanie
+  ## GitHuba, nie coś, co zlb kontroluje. Jeśli NAJNOWSZY (albo wręcz
+  ## JEDYNY) release repo zpm jest oznaczony jako pre-release (częste przy
+  ## wczesnych wydaniach 0.x), `/releases/latest/download/zpm` zwróci 404,
+  ## MIMO że release i asset faktycznie istnieją i są pobieralne pod
+  ## przypiętym URL-em `/releases/download/<tag>/zpm`. Same demaskowanie
+  ## tego przez zwykłe "sprawdź URL i połączenie sieciowe" wprowadzało w
+  ## błąd -- URL był poprawny, połączenie działało, po prostu GitHub
+  ## celowo nie uznaje pre-release za "latest".
 
 proc downloadBinary(url, dest: string): bool =
   ## Pobiera przez `curl`/`wget` jako podproces (NIE `std/httpclient`).
@@ -65,11 +80,57 @@ proc downloadBinary(url, dest: string): bool =
   echo &"==> [tools] ✔ {dest}"
   true
 
+proc pickLatestTagFromReleasesJson*(jsonText: string): string =
+  ## Czysta funkcja (BEZ sieci, więc łatwo testowalna) -- bierze treść
+  ## zwróconą przez GitHub REST API `GET /repos/{owner}/{repo}/releases`
+  ## (lista WSZYSTKICH release'ów danego repo, posortowana od
+  ## najnowszego -- w PRZECIWIEŃSTWIE do endpointu/aliasu `.../latest`,
+  ## który cicho POMIJA pre-release i draft) i zwraca `tag_name`
+  ## PIERWSZEGO wpisu, czyli faktycznie najnowszy tag, niezależnie od
+  ## flagi `prerelease`/`draft`. Pusty/błędny JSON, pusta lista albo brak
+  ## klucza `tag_name` -> "".
+  if jsonText.len == 0: return ""
+  try:
+    let parsed = parseJson(jsonText)
+    if parsed.kind == JArray and parsed.len > 0 and parsed[0].kind == JObject:
+      return parsed[0]{"tag_name"}.getStr("")
+  except CatchableError:
+    discard
+  ""
+
+proc fallbackPinnedZpmUrl(): string =
+  ## Wywoływane TYLKO gdy pobranie spod `DefaultZpmReleaseUrl` (alias
+  ## "latest") zawiedzie -- odpytuje REST API o pełną (nieprzefiltrowaną)
+  ## listę release'ów repo zpm i buduje URL przypięty do faktycznie
+  ## najnowszego taga (patrz `pickLatestTagFromReleasesJson`). Zwraca ""
+  ## jeśli `curl` niedostępne albo zapytanie/parsowanie się nie powiedzie
+  ## -- wołający wtedy po prostu zgłasza niepowodzenie tak jak dotychczas.
+  if findExe("curl").len == 0: return ""
+  let apiUrl = &"https://api.github.com/repos/{zpmOwner}/{zpmRepoName}/releases"
+  let cmd = &"curl -fsSL --retry 2 -H \"Accept: application/vnd.github+json\" \"{apiUrl}\""
+  let (output, exitCode) = execCmdEx(cmd)
+  if exitCode != 0: return ""
+  let tag = pickLatestTagFromReleasesJson(output)
+  if tag.len == 0: return ""
+  &"https://github.com/{zpmOwner}/{zpmRepoName}/releases/download/{tag}/zpm"
+
 proc ensureZpm(cacheDir: string): bool =
   let dest = cacheDir / "zpm"
   if fileExists(dest): return true
   if findExe("zpm").len > 0: return true  # już dostępne systemowo
-  downloadBinary(DefaultZpmReleaseUrl, dest)
+  if downloadBinary(DefaultZpmReleaseUrl, dest): return true
+  # `latest` zawiodło -- prawdopodobnie najnowszy release jest oznaczony
+  # jako pre-release/draft (patrz komentarz przy `DefaultZpmReleaseUrl`).
+  # Zanim poddamy się na dobre, sprawdź przez REST API, czy istnieje
+  # jakikolwiek faktyczny release, i spróbuj pobrać spod przypiętego URL-a.
+  echo "==> [tools] alias 'latest' nie znalazł release'u (może być oznaczony jako pre-release) -- " &
+    "sprawdzam REST API GitHuba o faktycznie najnowszy tag..."
+  let fallbackUrl = fallbackPinnedZpmUrl()
+  if fallbackUrl.len == 0:
+    stderr.writeLine("==> [tools] ✘ nie udało się ustalić najnowszego taga przez REST API -- " &
+      "sprawdź, czy repo zpm ma w ogóle jakikolwiek release, albo połączenie z api.github.com")
+    return false
+  downloadBinary(fallbackUrl, dest)
 
 proc ensureBuildTools*(p: ProjectPaths, allowPlaceholder: bool) =
   ## Wywoływane na samym początku każdej komendy `zlb build ...`.
