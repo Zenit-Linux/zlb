@@ -13,14 +13,27 @@
 
 (defn ensure-out-dir [] (os/mkdir out-dir))
 
+# NAPRAWIONE: `-d:ssl` usunięte z obu poniższych zadań. Historycznie zlb
+# było budowane z `-d:ssl`, bo `zlbpkg/tools.nim` pobierało `zpm`/`installer`
+# przez `std/httpclient`, które potrafi obsłużyć HTTPS TYLKO gdy binarka
+# jest skompilowana z tą flagą -- inaczej w runtime leci "SSL support is
+# not available. Cannot connect over SSL. Compile with -d:ssl to enable."
+# (dokładnie ten błąd, na który trafiali użytkownicy bez OpenSSL na
+# maszynie budującej). `tools.nim` NIE używa już `std/httpclient` -- wywołuje
+# `curl`/`wget` jako podproces właśnie po to, żeby zlb nie musiało wymagać
+# OpenSSL w ogóle. `-d:ssl` w tych zadaniach było więc martwym, niepotrzebnym
+# wymaganiem: zostawione tutaj, dalej wymuszało (na niektórych systemach)
+# obecność OpenSSL tylko po to, żeby zlinkować binarkę, która i tak go
+# nigdy nie używa. Jeśli w przyszłości jakiś moduł zlb faktycznie zacznie
+# używać `std/httpclient`, tę flagę trzeba będzie przywrócić.
 (defn task-release []
   (ensure-out-dir)
-  (sh (string "nim c -d:release -d:ssl --opt:speed --out:" out-dir "/zlb " src-file))
+  (sh (string "nim c -d:release --opt:speed --out:" out-dir "/zlb " src-file))
   (print "-> " out-dir "/zlb"))
 
 (defn task-debug []
   (ensure-out-dir)
-  (sh (string "nim c -d:ssl --out:" out-dir "/zlb-debug " src-file))
+  (sh (string "nim c --out:" out-dir "/zlb-debug " src-file))
   (print "-> " out-dir "/zlb-debug"))
 
 (defn task-check []
