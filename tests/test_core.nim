@@ -1,4 +1,4 @@
-import std/[unittest, os, tempfiles, strutils]
+import std/[unittest, os, tempfiles, strutils, sequtils]
 import ../src/zlbpkg/hcl
 import ../src/zlbpkg/manifest
 import ../src/zlbpkg/types
@@ -159,7 +159,7 @@ suite "modules (package.list w formacie HCL -- v0.3)":
         description = "jądro testowe"
       }
     """)
-    let mp = discoverModule(dir, "core")
+    let mp = discoverModule(dir, "core", "")
     check mp.installList.len == 3
     check mp.installList[0].name == "base"
     check mp.installList[0].backend == ""
@@ -178,7 +178,7 @@ suite "modules (package.list w formacie HCL -- v0.3)":
       }
     """)
     expect(ZlbError):
-      discard discoverModule(dir, "core")
+      discard discoverModule(dir, "core", "")
 
   test "pusty package.list -> pusta lista, bez błędu":
     let dir = createTempDir("zlbtest", "")
@@ -186,8 +186,45 @@ suite "modules (package.list w formacie HCL -- v0.3)":
     let modDir = dir / "core"
     createDir(modDir)
     writeFile(modDir / "package.list", "# tylko komentarz\n")
-    let mp = discoverModule(dir, "core")
+    let mp = discoverModule(dir, "core", "")
     check mp.installList.len == 0
+
+  test "pole 'arch' filtruje pakiety per architektura budowania":
+    let dir = createTempDir("zlbtest", "")
+    defer: removeDir(dir)
+    let modDir = dir / "core"
+    createDir(modDir)
+    writeFile(modDir / "package.list", """
+      package "base" {}
+      package "grub-efi-amd64" {
+        backend = "apt"
+        arch    = "x86_64"
+      }
+      package "grub-efi-arm64" {
+        backend = "apt"
+        arch    = "aarch64"
+      }
+      package "wspolny-dla-obu" {
+        backend = "apt"
+        arch    = "x86_64,aarch64"
+      }
+    """)
+    let mpX86 = discoverModule(dir, "core", "x86_64")
+    check mpX86.installList.len == 3
+    check "grub-efi-amd64" in mpX86.installList.mapIt(it.name)
+    check "grub-efi-arm64" notin mpX86.installList.mapIt(it.name)
+    check "wspolny-dla-obu" in mpX86.installList.mapIt(it.name)
+
+    let mpArm = discoverModule(dir, "core", "aarch64")
+    check mpArm.installList.len == 3
+    check "grub-efi-arm64" in mpArm.installList.mapIt(it.name)
+    check "grub-efi-amd64" notin mpArm.installList.mapIt(it.name)
+
+    # targetArch == "" (np. `zlb modules list` / `zlb manifest validate`,
+    # niezwiązane z jedną konkretną architekturą builda) -> pokazuje/
+    # waliduje WSZYSTKO, bez filtrowania.
+    let mpAll = discoverModule(dir, "core", "")
+    check mpAll.installList.len == 4
 
 suite "toolset (GNU vs zenit -- distro.hcl toolset { })":
   test "domyślny profil to gnu, bez bloku toolset {}":
