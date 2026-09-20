@@ -129,6 +129,15 @@ type
                                ## nigdy przez bezpośrednie dopisanie repo do hosta.
     description*: string      ## v0.3: czysto informacyjny opis (dokumentacja modułu,
                                ## wyświetlany w podsumowaniach builda) -- nieużywany do logiki
+    arches*: seq[string]      ## v0.4: "" / brak pola = pakiet dotyczy WSZYSTKICH architektur
+                               ## (jak dotąd). Niepuste = lista architektur oddzielona
+                               ## przecinkami w polu `arch` (np. `arch = "x86_64"` albo
+                               ## `arch = "x86_64,aarch64"`) -- pakiet jest pomijany przy
+                               ## budowaniu dla architektury spoza tej listy. Rozwiązuje
+                               ## przypadki takie jak grub, gdzie prawdziwa nazwa pakietu w
+                               ## apt jest RÓŻNA per architektura (grub-efi-amd64 na x86_64
+                               ## vs grub-efi-arm64 na aarch64) -- bez tego pola nie dało się
+                               ## tego wyrazić w jednym package.list.
 
   ModulePackages* = object
     name*: string
