@@ -111,7 +111,7 @@ proc buildRootfs*(p: ProjectPaths, m: Manifest, projectRoot, arch: string, tools
 
   echo &"==> [{arch}] discovering modules"
   let includeMods = resolveIncludeModsWithToolset(m, projectRoot, toolsetOverride)
-  let mods = discoverModules(projectRoot / "modules", includeMods)
+  let mods = discoverModules(projectRoot / "modules", arch, includeMods)
   echo &"    {mods.len} module(s), {totalInstallCount(mods)} package(s) to install, {totalRemoveCount(mods)} to remove"
 
   let defaultBackend = backendForBase(m)
