@@ -144,7 +144,7 @@ proc cmdBuildAll(archFlag, manifestFile, toolsetFlag: string, allowPlaceholder: 
 
 proc cmdModulesList(manifestFile: string) =
   let (m, root, _) = loadProject(manifestFile)
-  let mods = discoverModules(root / "modules", m.modules.includeMods)
+  let mods = discoverModules(root / "modules", "", m.modules.includeMods)
   echo &"{mods.len} module(s) for {m.distro.name} {m.distro.version}:"
   for md in mods:
     echo &"  - {md.name}: {md.installList.len} install, {md.removeList.len} remove, {md.janetScripts.len} janet hook(s)"
@@ -169,7 +169,7 @@ proc cmdManifestValidate(manifestFile: string) =
 
   var mods: seq[ModulePackages]
   try:
-    mods = discoverModules(root / "modules", m.modules.includeMods)
+    mods = discoverModules(root / "modules", "", m.modules.includeMods)
   except ZlbError as e:
     stderr.writeLine(&"✘ moduły ({m.modules.includeMods.join(\", \")}): {e.msg}")
     quit(1)
