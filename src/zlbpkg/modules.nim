@@ -1,4 +1,4 @@
-import std/[os, strutils, algorithm, strformat]
+import std/[os, strutils, sequtils, algorithm, strformat]
 import ./types
 import ./hcl
 
@@ -25,6 +25,17 @@ import ./hcl
 ## LISTĘ (patrz `setField` w hcl.nim) -- to jest właściwość parsera HCL
 ## używana już przez `module "a" { }` / `module "b" { }` w distro.hcl.
 
+## v0.4 -- opcjonalne pole `arch` w bloku `package "nazwa" { ... }`:
+##
+##   package "grub" {
+##     backend = "apt"
+##     arch    = "x86_64"          # albo: arch = "x86_64,aarch64"
+##   }
+##
+## Brak pola `arch` (jak dotąd) = pakiet dotyczy WSZYSTKICH architektur.
+## Filtrowanie dzieje się w `readListFile`/`discoverModule`, które biorą
+## teraz docelową architekturę builda -- patrz `buildRootfs` w rootfs.nim.
+
 proc parsePackageBlock(blk: HclValue): PackageEntry =
   let name = blk.getStr("_label")
   if name.len == 0:
@@ -35,10 +46,20 @@ proc parsePackageBlock(blk: HclValue): PackageEntry =
     raise newException(ZlbError,
       &"package \"{name}\": pole 'variant' wymaga jawnie podanego 'backend' -- backend decyduje o " &
       "znaczeniu wariantu (branch dla \"own\", dystrybucja dla reszty)")
+  let archRaw = blk.getStr("arch", "")
+  let arches = if archRaw.len == 0: @[]
+               else: archRaw.split(',').mapIt(it.strip).filterIt(it.len > 0)
   PackageEntry(name: name, backend: backend, variant: variant,
-               description: blk.getStr("description", ""))
+               description: blk.getStr("description", ""), arches: arches)
 
-proc readListFile(path: string): seq[PackageEntry] =
+proc appliesToArch(entry: PackageEntry, targetArch: string): bool =
+  ## targetArch == "" -> brak konkretnej architektury builda (np. `zlb
+  ## modules list` / `zlb manifest validate`, patrz wywołania w zlb.nim) --
+  ## wtedy pokazujemy/walidujemy WSZYSTKIE pakiety, niezależnie od `arch`,
+  ## zamiast mylnie odfiltrowywać cokolwiek, co ma ograniczenie per-arch.
+  targetArch.len == 0 or entry.arches.len == 0 or targetArch in entry.arches
+
+proc readListFile(path, targetArch: string): seq[PackageEntry] =
   result = @[]
   if not fileExists(path): return
   let raw = readFile(path).strip()
@@ -53,23 +74,30 @@ proc readListFile(path: string): seq[PackageEntry] =
   let pkgField = root["package"]
   if pkgField.isNil: return
 
+  var parsed: seq[PackageEntry] = @[]
   if pkgField.kind == hkBlock:
-    result.add parsePackageBlock(pkgField)
+    parsed.add parsePackageBlock(pkgField)
   elif pkgField.kind == hkList:
     for item in pkgField.listVal:
       if item.kind != hkBlock:
         raise newException(ZlbError, &"{path}: oczekiwano bloków 'package \"nazwa\" {{ ... }}'")
-      result.add parsePackageBlock(item)
+      parsed.add parsePackageBlock(item)
 
-proc discoverModule*(modulesRoot, name: string): ModulePackages =
+  for entry in parsed:
+    if appliesToArch(entry, targetArch):
+      result.add entry
+    else:
+      echo &"    (pomijam '{entry.name}' -- arch = \"{entry.arches.join(\",\")}\" nie obejmuje '{targetArch}')"
+
+proc discoverModule*(modulesRoot, name, targetArch: string): ModulePackages =
   let dir = modulesRoot / name
   if not dirExists(dir):
     raise newException(ZlbError, "Module '" & name & "' listed in distro.hcl but " &
       dir & " does not exist")
 
   result.name = name
-  result.installList = readListFile(dir / "package.list")
-  result.removeList = readListFile(dir / "package.remove")
+  result.installList = readListFile(dir / "package.list", targetArch)
+  result.removeList = readListFile(dir / "package.remove", targetArch)
 
   let scriptsDir = dir / "scripts"
   result.janetScripts = @[]
@@ -119,7 +147,7 @@ proc withToolset*(includeMods: seq[string], toolsetModule: string): seq[string] 
   result = includeMods
   result.add toolsetModule
 
-proc discoverModules*(modulesRoot: string, includeMods: seq[string]): seq[ModulePackages] =
+proc discoverModules*(modulesRoot, targetArch: string, includeMods: seq[string]): seq[ModulePackages] =
   result = @[]
   if includeMods.len == 0:
     # nothing declared explicitly: build every directory found under modules/
@@ -129,10 +157,10 @@ proc discoverModules*(modulesRoot: string, includeMods: seq[string]): seq[Module
       if kind == pcDir: names.add extractFilename(path)
     names.sort(cmp[string])
     for n in names:
-      result.add discoverModule(modulesRoot, n)
+      result.add discoverModule(modulesRoot, n, targetArch)
   else:
     for n in includeMods:
-      result.add discoverModule(modulesRoot, n)
+      result.add discoverModule(modulesRoot, n, targetArch)
 
 proc totalInstallCount*(mods: seq[ModulePackages]): int =
   for m in mods: result += m.installList.len
