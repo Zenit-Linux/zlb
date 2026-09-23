@@ -46,10 +46,17 @@ proc parsePackageBlock(blk: HclValue): PackageEntry =
     raise newException(ZlbError,
       &"package \"{name}\": pole 'variant' wymaga jawnie podanego 'backend' -- backend decyduje o " &
       "znaczeniu wariantu (branch dla \"own\", dystrybucja dla reszty)")
+  let version = blk.getStr("version", "")
+  if version.len > 0 and backend != "own":
+    raise newException(ZlbError,
+      &"package \"{name}\": pole 'version' działa TYLKO z backend = \"own\" (przypina konkretne " &
+      "wydanie z own-repository.json, patrz resolveVersionPlaceholder w zpm) -- dla apt/dnf/pacman/" &
+      "zypper przypinanie wersji ma zupełnie inną, natywną składnię tych menedżerów, nieobsługiwaną " &
+      "jeszcze przez to pole")
   let archRaw = blk.getStr("arch", "")
   let arches = if archRaw.len == 0: @[]
                else: archRaw.split(',').mapIt(it.strip).filterIt(it.len > 0)
-  PackageEntry(name: name, backend: backend, variant: variant,
+  PackageEntry(name: name, backend: backend, variant: variant, version: version,
                description: blk.getStr("description", ""), arches: arches)
 
 proc appliesToArch(entry: PackageEntry, targetArch: string): bool =
