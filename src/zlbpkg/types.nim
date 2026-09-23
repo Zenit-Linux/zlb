@@ -138,6 +138,16 @@ type
                                ## apt jest RÓŻNA per architektura (grub-efi-amd64 na x86_64
                                ## vs grub-efi-arm64 na aarch64) -- bez tego pola nie dało się
                                ## tego wyrazić w jednym package.list.
+    version*: string          ## v0.6: TYLKO dla backend = "own" (walidowane w
+                               ## parsePackageBlock). Jawnie żądana wersja wydania (np.
+                               ## `version = "2024.10"`), podmieniana wprost za `{version}`
+                               ## w polu "bin" repozytorium own-repository.json -- BEZ
+                               ## pytania api.github.com "jaka jest najnowsza" (patrz
+                               ## resolveVersionPlaceholder w zpm). Nie zmienia formatu
+                               ## own-repository.json -- to czysto lokalna decyzja w
+                               ## package.list tej dystrybucji. Przekazywane do zpm jako
+                               ## `nazwa@wersja` w tym samym miejscu, gdzie zwykle jest samo
+                               ## `nazwa` (patrz entryArg w zlbpkg/zpm.nim).
 
   ModulePackages* = object
     name*: string
