@@ -104,7 +104,66 @@ workflow {
 bools, and lists. No expressions/functions/for-loops; that's
 intentional, manifests stay easy to diff and hand-edit.
 
-## Self-hosted bootstrap
+## `package.list` format
+
+Each `modules/<name>/package.list` lists what to install for that module,
+via `zpm` (`package.remove` uses the identical syntax, for removals).
+
+```hcl
+package "curl" {}                       # bare name -> backend = apt (host default)
+
+package "network-manager" {
+  backend     = "apt"
+  description = "human-readable note, shown in build summaries only"
+}
+
+package "grub-pc" {
+  backend = "apt"
+  arch    = "x86_64"                    # comma-separated list, e.g. "x86_64,aarch64"
+}                                        # bare packages (no "arch") apply to EVERY arch
+
+package "grub-efi-arm64" {
+  backend = "apt"
+  arch    = "aarch64"
+}
+
+package "kernel" {
+  backend = "own"
+  variant = "stable"                    # backend="own" -> branch/system variant
+  version = "2024.10"                   # backend="own" ONLY -- pins the exact release
+}                                        # tag substituted for "{version}" in the tool's
+                                         # "bin" URL (own-repository.json), so `zpm` never
+                                         # has to ask GitHub "what's latest" for this one
+```
+
+Fields:
+- **`backend`** -- `apt`, `dnf`, `pacman`, `zypper`, `brew`, `flatpak`, `snap`,
+  `cargo`, `npm`, `pip`, or `own` (Zenit's own tool ecosystem, see
+  `custom/own-repository.json`). Defaults to whatever `zpm` picks as the
+  host's native package manager if omitted.
+- **`variant`** -- requires `backend` to be set explicitly. Meaning
+  depends on the backend: for `own`, it's a branch/system name (see
+  `zpm own systems`); for everything else, it's currently unused.
+- **`arch`** -- comma-separated list of architectures this package
+  applies to (matches whatever `distro.arch` uses, e.g. `x86_64`,
+  `aarch64`). Omit it (or leave empty) to apply to every architecture,
+  which is the default and matches all prior behavior. Packages outside
+  the current build's `--arch` are silently skipped (logged at build
+  time) -- this exists because some packages have a **different real
+  name per architecture** (`grub-efi-amd64` vs `grub-efi-arm64`; there's
+  no single apt package name that works on both).
+- **`version`** -- **only** valid together with `backend = "own"`.
+  Pins an exact release tag, substituted for `{version}` in that tool's
+  `bin` URL in `own-repository.json`. Without it, `zpm` resolves
+  "latest" itself (redirect → centralized manifest → REST API, in that
+  order of preference -- see `zpm`(1) § OPTYMALIZACJA ZAPYTAŃ API for
+  why that matters at scale). Using any other backend with `version` set
+  is a manifest error (`zlb` refuses to build) -- apt/dnf/pacman/zypper
+  have their own, different version-pinning syntax, not handled by this
+  field yet.
+- **`description`** -- free text, purely informational.
+
+
 
 `distro.base = "self"` means a given arch's build bootstraps from a
 Zenit rootfs tarball *previously built by ZLB itself*
@@ -123,13 +182,19 @@ interpreter into the staged rootfs's `/usr/bin` so package installs
 and `.janet` hooks run as if natively on the target (`zlbpkg/crosscompile.nim`).
 Nothing extra needed in `distro.hcl` beyond listing the arch.
 
-## zpm (placeholder)
+## zpm
 
-`zpm`, Zenit's own package manager, isn't finished yet. Every call
-in `zlbpkg/zpm.nim` shells out to a real `zpm` binary if one is found
-on PATH; otherwise it logs exactly what it *would* run and continues,
-so `zlb build` stays fully exercisable end-to-end today. Swapping in
-the real implementation later touches nothing else in ZLB.
+`zpm`, Zenit's own package manager, is the real backend `zlb` shells out
+to for every package install/remove during a build (`zlbpkg/zpm.nim`
+serializes each `package.list` entry to the compact `name -> backend ->
+variant` syntax `zpm` parses -- see `parsePackageSpec` in `zpm`'s
+`orchestrator.nim`/`building.nim`). If `zpm` isn't found on `PATH` (and
+`zlb` can't fetch one itself), the build fails hard by default rather
+than silently producing an image with nothing actually installed --
+pass `--allow-placeholder` only if that's genuinely what you want (e.g.
+smoke-testing the pipeline itself). See `zpm`(1) for how to obtain a
+real `zpm` (release binary, a pinned version, or building it from
+source).
 
 ## CI/CD
 
