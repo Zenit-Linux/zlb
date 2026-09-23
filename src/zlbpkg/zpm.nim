@@ -27,14 +27,22 @@ proc findZpmBinary(): string =
       if found.len > 0: return found
   return ""
 
-proc entryArg(e: PackageEntry): string =
+proc entryArg*(e: PackageEntry): string =
   ## Serializuje PackageEntry z powrotem do zwartej składni "nazwa ->
   ## backend -> wariant" rozumianej przez zpm (parsePackageSpec w
   ## zpmpkg/orchestrator.nim / building.nim). To jest jedyny punkt
   ## styku między formatem HCL package.list (zlbpkg/modules.nim) a CLI
   ## zpm -- zlb PARSUJE HCL, zpm NIGDY go nie widzi, dostaje tylko ten
   ## zwarty string jako argument pozycyjny.
-  result = e.name
+  ##
+  ## v0.6: jeśli package.list ma `version = "..."` (tylko backend="own",
+  ## walidowane w modules.nim), doklejamy ją do nazwy jako "nazwa@wersja"
+  ## -- DOKŁADNIE ta sama składnia co `zpm own install <nazwa>@<wersja>`
+  ## z linii poleceń (patrz splitOwnNameVersion w zpm). Dzięki temu zpm w
+  ## trybie budowania wcale nie musi pytać api.github.com "jaka jest
+  ## najnowsza wersja" -- omija limit zapytań całkowicie, bez zmiany
+  ## formatu own-repository.json.
+  result = if e.version.len > 0: e.name & "@" & e.version else: e.name
   if e.backend.len > 0:
     result &= " -> " & e.backend
     if e.variant.len > 0:
