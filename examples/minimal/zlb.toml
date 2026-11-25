@@ -1,0 +1,37 @@
+# zlb.toml — główny manifest zlb (Zenit Linux Builder)
+# Pełna lista kluczy i wartości domyślnych: docs/MANIFEST.md
+
+[distro]
+name = "My Distro"
+id = "mydistro"
+version = "2026.11"
+arch = "x86_64"
+hostname = "mydistro"
+locale = "en_US.UTF-8"
+keymap = "us"
+timezone = "UTC"
+
+[build]
+formats = ["iso"]            # iso | squashfs | tar | rootfs
+compression = "zstd"
+compression_level = 19
+profile = "live"
+iso_name = "{id}-{version}-{arch}.iso"
+
+[packages]
+list = "packages/zlb.list"
+recommends = false
+manager = "auto"          # auto | zypper | zpm — auto: zpm dla obrazów bez systemd, gdy jest w PATH
+
+[init]
+system = "systemd"          # zenitd | systemd | custom | none
+
+[live]
+enabled = true
+user = "live"
+autologin = true
+
+[boot]
+bios = true
+uefi = true
+timeout = 5
