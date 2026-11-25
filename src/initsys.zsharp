@@ -1,0 +1,125 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.packages;
+
+##
+ * initsys — system init obrazu. Dla init.system = "zenitd": pobranie/zbudowanie zenitd i instalacja jego skryptem
+ * scripts/install.sh (DESTDIR=rootfs), naprawa dowiązań na usr-merge, cel domyślny, włączenie usług offline,
+ * usunięcie systemd (rpm -e --nodeps + blokada).
+##
+
+func unitName($n) {
+    return (ends_with($n, ".service") || ends_with($n, ".target") || ends_with($n, ".socket") || ends_with($n, ".timer")) ? $n : $n . ".service";
+}
+
+# katalog z checkoutem zenitd (git: klon do cache; path: wskazany katalog)
+func sourceDir($x) {
+    if ($x->cfg("init.source") === "path") {
+        $p = util.absPath($x->cfg("init.path"), $x->c["_root"]);
+        if (!Os.isDir($p)) { util.die("init.path nie istnieje: " . $p); }
+        return $p;
+    }
+    $dir = util.pjoin($x->p["cache_dir"], "zenitd-src");
+    $ref = $x->cfg("init.ref");
+    $repo = $x->cfg("init.repo");
+    if (Os.isDir(util.pjoin($dir, ".git"))) {
+        $x->r->run(["git", "-C", $dir, "fetch", "--depth", "1", "origin", $ref]);
+        $x->r->run(["git", "-C", $dir, "checkout", "--force", "FETCH_HEAD"]);
+    } else {
+        $x->r->mkdir($x->p["cache_dir"]);
+        $x->r->run(["git", "clone", "--depth", "1", "--branch", $ref, $repo, $dir]);
+    }
+    return $dir;
+}
+
+func buildZenitd($x, $src) {
+    $bin = util.pjoin($src, "target/release/zenitd");
+    if ($x->cfg("init.build")) {
+        $cmd = $x->cfg("init.build_cmd");
+        $x->r->run(["bash", "-ec", "cd " . util.shq($src) . " && " . $cmd]);
+    } else {
+        $given = util.absPath($x->cfg("init.binary"), $x->c["_root"]);
+        if (!$x->r->dry && !Os.isFile($given)) { util.die("init.binary nie istnieje: " . $given); }
+        $x->r->mkdir(util.pjoin($src, "target/release"));
+        $x->r->run(["install", "-m", "0755", $given, $bin]);
+    }
+    if (!$x->r->dry && !Os.isFile($bin)) { util.die("brak " . $bin . " — zbuduj zenitd (z# build --release) albo ustaw init.build = false i init.binary"); }
+    return $bin;
+}
+
+func installZenitd($x) {
+    $src = sourceDir($x);
+    buildZenitd($x, $src);
+    $root = $x->rootfs();
+    $prefix = $x->cfg("init.prefix");
+    $inst = util.pjoin($src, $x->cfg("init.installer"));
+    if (!$x->r->dry && !Os.isFile($inst)) { util.die("brak skryptu instalacyjnego: " . $inst); }
+    $args = ["bash", $inst, "--no-build", "--zenit"];   # --zenit: usr-merge + SystemdUnitCompat (wymaga install.sh zenitd z tą flagą)
+    if (!$x->cfg("init.compat")) { $args[] = "--no-compat"; }
+    $x->r->run($args, ["env" => ["DESTDIR" => $root, "PREFIX" => $prefix]]);
+    fixLinks($x);
+    verify($x);
+}
+
+##
+ * scripts/install.sh robi `ln -sf ../usr/lib/zenit/zenitd $DESTDIR/sbin/init`. Na systemach z usr-merge (openSUSE: /sbin → usr/sbin)
+ * link ląduje w /usr/sbin i `../usr/lib/...` wskazuje /usr/usr/lib/... — init byłby zepsuty. Zastępujemy je linkami bezwzględnymi.
+##
+func fixLinks($x) {
+    $prefix = $x->cfg("init.prefix");
+    $t = $prefix . "/lib/zenit/zenitd";
+    $x->r->chrootSh($x->rootfs(),
+        "d=\"\$(readlink -f /sbin)\"; mkdir -p \"\$d\"; ln -sfn " . util.shq($t) . " \"\$d/init\"; ln -sfn " . util.shq($t) . " \"\$d/zenitd\"");
+}
+
+func verify($x) {
+    $prefix = $x->cfg("init.prefix");
+    $t = $prefix . "/lib/zenit/zenitd";
+    if ($x->r->dry) { return true; }
+    $got = $x->r->chrootCapture($x->rootfs(), ["readlink", "-f", "/sbin/init"]);
+    if (trim($got["stdout"]) !== $t) { util.die("/sbin/init nie wskazuje na " . $t . " (jest: '" . trim($got["stdout"]) . "')"); }
+    # readlink w niektórych implementacjach (busybox) rozwiązuje względem tekstu ścieżki, nie jak jądro — sprawdź też realnym dostępem
+    if (!$x->r->ok(["chroot", $x->rootfs(), "test", "-x", "/sbin/init"])) { util.die("/sbin/init nie jest wykonywalny w obrazie (zepsute dowiązanie?)"); }
+    $need = ["zenitctl"];
+    if ($x->cfg("init.compat")) { $need = [...$need, "systemctl", "journalctl", "reboot", "poweroff"]; }
+    foreach ($need as $n) {
+        if (!$x->r->ok(["chroot", $x->rootfs(), "test", "-x", $prefix . "/bin/" . $n])) { util.warn("brak apletu zenitd w obrazie: " . $prefix . "/bin/" . $n); }
+    }
+}
+
+func setDefaultTarget($x) {
+    $t = $x->cfg("init.default_target");
+    if (!ends_with($t, ".target")) { $t .= ".target"; }
+    $prefix = $x->cfg("init.prefix");
+    $x->r->chrootSh($x->rootfs(), "test -e " . util.shq($prefix . "/lib/zenit/system/" . $t) . " || { echo 'brak celu " . $t . "' >&2; exit 1; }; ln -sfn " . util.shq($prefix . "/lib/zenit/system/" . $t) . " /etc/zenit/system/default.target");
+}
+
+# zenitctl enable działa offline (chroot) — zob. README zenitd
+func enableUnits($x) {
+    foreach (util.asList($x->cfg("init.enable")) as $u) {
+        $x->r->chroot($x->rootfs(), [$x->cfg("init.prefix") . "/bin/zenitctl", "enable", unitName($u)]);
+    }
+}
+
+func removeSystemd($x) {
+    if (!$x->cfg("init.remove_systemd")) { return []; }
+    return packages.forceRemove($x, util.asList($x->cfg("init.systemd_packages")));
+}
+
+func setup($x) {
+    $s = $x->initSystem();
+    if ($s === "zenitd") {
+        if ($x->manager() !== "zpm") { removeSystemd($x); }   # z zpm atrapa + blokady robią to spójnie wcześniej, w etapie packages
+        else { util.info("systemd obsługuje zpm (atrapa Provides + blokady) — pomijam rpm -e --nodeps"); }
+        installZenitd($x);
+        setDefaultTarget($x);
+        enableUnits($x);
+    } elseif ($s === "custom") {
+        if ($x->manager() !== "zpm" && $x->cfg("init.custom.block_systemd")) { removeSystemd($x); }
+        foreach (util.asList($x->cfg("init.custom.post")) as $cmd) { $x->r->chrootSh($x->rootfs(), $cmd); }
+    } elseif ($s === "systemd") {
+        util.info("init.system = systemd — pomijam instalację init");
+    } else {
+        util.info("init.system = none — obraz bez init (dostarcz własny w hookach)");
+    }
+}
