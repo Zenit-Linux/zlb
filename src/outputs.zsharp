@@ -1,0 +1,30 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+import Workspace.packages;
+import Workspace.manifest;
+
+##
+ * outputs — sumy kontrolne, podpis GPG (opcjonalny), manifest pakietów dla każdego pliku wynikowego.
+##
+
+func finalize($x, $files) {
+    $od = $x->p["output_dir"];
+    $manifest = packages.manifest($x);
+    $leak = manifest.leaks($manifest, $x->c);
+    if (count($leak) > 0) { util.warn("w obrazie są pakiety systemd mimo init=" . $x->initSystem() . ": " . join($leak, " ") . " (zob. zpm / init.remove_systemd; zlb verify zakończy się błędem)"); }
+    foreach ($files as $f) {
+        $name = Path.basename($f);
+        if ($x->cfg("checksums.sha256")) {
+            $x->r->sh("cd " . util.shq($od) . " && sha256sum " . util.shq($name) . " > " . util.shq($name . ".sha256"));
+        }
+        $key = $x->cfg("checksums.sign_key");
+        if ($key !== "") {
+            $x->r->run(["gpg", "--batch", "--yes", "--armor", "--local-user", $key, "--detach-sign", "--output", $f . ".asc", $f]);
+        }
+        if (ends_with($name, ".iso") || ends_with($name, ".squashfs")) {
+            $x->r->write($f . ".packages", join($manifest, "\n") . "\n", 420);
+        }
+        if (!$x->r->dry && Os.isFile($f)) { util.info($name . " (" . util.humanSize(Os.size($f)) . ")"); }
+    }
+}
