@@ -1,0 +1,135 @@
+import Std.Os;
+import Workspace.util;
+
+##
+ * runner — jedyne miejsce, które uruchamia procesy. Tryby: normalny, --dry-run (tylko zapis), z logiem do pliku.
+ * Wszystko, co zmienia system hosta albo rootfs, przechodzi przez Runner, więc plan budowy da się
+ * wyświetlić (--dry-run) i przetestować bez roota.
+##
+class Runner {
+    public $dry = false;
+    public $logfile = null;
+    public $history = [];
+    public $fakeOut = [];     # testy: klucz = fragment polecenia, wartość = [status, stdout]
+
+    public function __construct($dry = false, $logfile = null) {
+        $this->dry = $dry;
+        $this->logfile = $logfile;
+    }
+
+    private function envPrefix($argv, $opts) {
+        $env = $opts["env"] ?? [];
+        if (count($env) === 0) { return $argv; }
+        $pre = ["env"];
+        foreach ($env as $k => $v) { $pre[] = $k . "=" . strval($v); }
+        return [...$pre, ...$argv];
+    }
+
+    private function note($argv) {
+        $line = util.shjoin($argv);
+        $this->history[] = $line;
+        if ($this->dry) { eecho(util.paint("2", "   [dry] " . $line)); }
+        else { util.debug("$ " . $line); }
+        return $line;
+    }
+
+    # uruchamia z dziedziczonym wyjściem (z logiem do pliku, jeśli ustawiony); zwraca kod wyjścia
+    public function run($argv, $opts = []) {
+        $argv = $this->envPrefix($argv, $opts);
+        $this->note($argv);
+        if ($this->dry) { return 0; }
+        $st = 0;
+        if ($this->logfile !== null) {
+            $st = Process.exec("bash", ["-c", "set -o pipefail; \"\$@\" 2>&1 | tee -a \"\$0\"", $this->logfile, ...$argv]);
+        } else {
+            $st = Process.exec($argv[0], array_slice($argv, 1));
+        }
+        if ($st !== 0 && ($opts["ok"] ?? false) !== true) {
+            util.die("polecenie zakończone kodem " . $st . ": " . util.shjoin($argv));
+        }
+        return $st;
+    }
+
+    # uruchamia i zbiera wyjście: ["status","stdout","stderr"]; nie rzuca wyjątku
+    public function capture($argv, $opts = []) {
+        $argv = $this->envPrefix($argv, $opts);
+        $line = $this->note($argv);
+        foreach ($this->fakeOut as $frag => $res) {
+            if (contains($line, $frag)) { return ["status" => $res[0], "stdout" => $res[1], "stderr" => ""]; }
+        }
+        if ($this->dry) { return ["status" => 0, "stdout" => "", "stderr" => ""]; }
+        return Process.run($argv[0], array_slice($argv, 1));
+    }
+
+    public function sh($script, $opts = []) { return $this->run(["bash", "-ec", $script], $opts); }
+
+    public function chroot($root, $argv, $opts = []) { return $this->run(["chroot", $root, ...$argv], $opts); }
+
+    public function chrootCapture($root, $argv, $opts = []) { return $this->capture(["chroot", $root, ...$argv], $opts); }
+
+    public function chrootSh($root, $script, $opts = []) {
+        return $this->run(["chroot", $root, "/bin/bash", "-ec", $script], $opts);
+    }
+
+    # odmontowuje wszystko, co jest zamontowane pod $root (wg /proc/self/mountinfo), od najgłębszych; zwraca listę punktów
+    public function unmountTree($root) {
+        if ($this->dry) { return []; }
+        $real = Os.exists($root) ? Os.realpath($root) : $root;
+        $mps = [];
+        if (File.exists("/proc/self/mountinfo")) {
+            foreach (util.lines(File.read("/proc/self/mountinfo")) as $l) {
+                $f = split($l, " ");
+                if (count($f) < 5) { continue; }
+                $mp = replace($f[4], "\\040", " ");
+                if ($mp === $real || starts_with($mp, $real . "/")) { $mps[] = $mp; }
+            }
+        }
+        $mps = usort($mps, fn($a, $b) => strlen($b) - strlen($a));
+        foreach ($mps as $mp) { $this->run(["umount", "-l", $mp], ["ok" => true]); }
+        return $mps;
+    }
+
+    # ── operacje na plikach (przez narzędzia hosta: zachowują atrybuty, bajty binarne, właściciela) ──
+    public function mkdir($p) { if ($this->dry) { $this->note(["mkdir", "-p", $p]); return 0; } return $this->run(["mkdir", "-p", $p]); }
+    public function rmrf($p) { return $this->run(["rm", "-rf", "--one-file-system", $p]); }
+    public function cpa($from, $to) { return $this->run(["cp", "-a", "--", $from, $to]); }
+    public function write($path, $data, $mode = null) {
+        $this->note(["write", $path]);
+        if ($this->dry) { return 0; }
+        File.write($path, $data);
+        if ($mode !== null) { File.chmod($path, $mode); }
+        return 0;
+    }
+    public function ok($argv) { $r = $this->capture($argv); return $r["status"] === 0; }
+    public function out($argv) { $r = $this->capture($argv); return trim($r["stdout"]); }
+}
+
+##
+ * Bind-mounty API jądra w rootfs na czas pracy w chroot (zypper/rpm scriptlets, hooki, dracut).
+ * Zawsze używaj w try/finally: unmount() jest idempotentne.
+##
+class ChrootMounts {
+    public $root;
+    public $r;
+    public $active = [];
+
+    public function __construct($r, $root) { $this->r = $r; $this->root = $root; }
+
+    public function mount() {
+        foreach ([["proc", "/proc", "-t", "proc"], ["sys", "/sys", "--rbind"], ["dev", "/dev", "--rbind"], ["run", "/run", "--bind"]] as $m) {
+            $target = $this->root . $m[1];
+            $this->r->mkdir($target);
+            if ($m[0] === "proc") { $this->r->run(["mount", "-t", "proc", "proc", $target]); }
+            elseif ($m[0] === "run") { $this->r->run(["mount", "-t", "tmpfs", "tmpfs", $target]); }
+            else { $this->r->run(["mount", $m[2], $m[1], $target]); $this->r->run(["mount", "--make-rslave", $target], ["ok" => true]); }
+            $this->active[] = $target;
+        }
+        return $this;
+    }
+
+    public function unmount() {
+        $rev = reverse($this->active);
+        foreach ($rev as $t) { $this->r->run(["umount", "-R", "-l", $t], ["ok" => true]); }
+        $this->active = [];
+    }
+}
