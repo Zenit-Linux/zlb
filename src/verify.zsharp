@@ -1,0 +1,90 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+import Workspace.config;
+import Workspace.manifest;
+
+##
+ * verify — kontrola gotowego ISO (suma, struktura rozruchu, etykieta, jądro/initrd/squashfs, brak systemd w manifeście)
+ * oraz run — start obrazu w QEMU (BIOS albo UEFI).
+##
+
+func parseElTorito($text): array {
+    $bios = false; $uefi = false;
+    foreach (util.lines($text) as $l) {
+        if (starts_with($l, "El Torito boot img")) {
+            if (contains($l, " BIOS ")) { $bios = true; }
+            if (contains($l, " UEFI ")) { $uefi = true; }
+        }
+    }
+    return ["bios" => $bios, "uefi" => $uefi];
+}
+
+func parseVolumeId($text) {
+    foreach (util.lines($text) as $l) {
+        if (starts_with($l, "Volume id")) {
+            $i = index_of($l, "'");
+            $j = $i < 0 ? -1 : index_of(substr($l, $i + 1), "'");
+            if ($i >= 0 && $j >= 0) { return substr($l, $i + 1, $j); }
+        }
+    }
+    return null;
+}
+
+func row($name, $ok, $detail) { return ["name" => $name, "ok" => $ok, "detail" => $detail]; }
+
+func verifyIso($x, $iso): array {
+    $rows = [];
+    $r = $x->r;
+    if (!Os.isFile($iso)) { return [row("plik", false, $iso . " nie istnieje")]; }
+    $rows[] = row("plik", true, $iso . " (" . util.humanSize(Os.size($iso)) . ")");
+    $sum = $iso . ".sha256";
+    if (Os.isFile($sum)) {
+        $res = $r->capture(["bash", "-c", "cd " . util.shq(Path.dirname($iso)) . " && sha256sum -c " . util.shq(Path.basename($sum))]);
+        $rows[] = row("sha256", $res["status"] === 0, $res["status"] === 0 ? "zgodna" : trim($res["stdout"] . $res["stderr"]));
+    } else { $rows[] = row("sha256", true, "brak pliku .sha256 (pominięto)"); }
+    $et = $r->capture(["xorriso", "-indev", $iso, "-report_el_torito", "plain"]);
+    $t = parseElTorito($et["stdout"] . $et["stderr"]);
+    if ($x->cfg("boot.bios")) { $rows[] = row("rozruch BIOS", $t["bios"], $t["bios"] ? "El Torito BIOS" : "brak wpisu BIOS"); }
+    if ($x->cfg("boot.uefi")) { $rows[] = row("rozruch UEFI", $t["uefi"], $t["uefi"] ? "El Torito UEFI" : "brak wpisu UEFI"); }
+    $vol = parseVolumeId($et["stdout"] . $et["stderr"]);
+    $label = $x->cfg("distro.iso_label");
+    $rows[] = row("etykieta", $vol === $label, "jest '" . strval($vol) . "', oczekiwana '" . $label . "'");
+    $ls = $r->capture(["xorriso", "-indev", $iso, "-ls", "/LiveOS", "/boot/" . $x->arch() . "/loader"]);
+    $out = $ls["stdout"];
+    foreach (["squashfs.img", "linux", "initrd"] as $f) { $rows[] = row("zawiera " . $f, contains($out, "'" . $f . "'"), contains($out, "'" . $f . "'") ? "jest" : "BRAK"); }
+    $man = $iso . ".packages";
+    if (Os.isFile($man)) {
+        $lk = manifest.leaks(Os.readLines($man), $x->c);
+        $rows[] = row("brak systemd w obrazie", count($lk) === 0, count($lk) === 0 ? "OK (init: " . $x->initSystem() . ")" : "WYCIEK: " . join($lk, " "));
+    } else { $rows[] = row("manifest pakietów", true, "brak pliku .packages (pominięto)"); }
+    return $rows;
+}
+
+func ovmfPath() {
+    foreach (["/usr/share/qemu/ovmf-x86_64.bin", "/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/ovmf/OVMF.fd", "/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/qemu/OVMF.fd"] as $p) {
+        if (Os.isFile($p)) { return $p; }
+    }
+    return null;
+}
+
+# czysta funkcja: argv QEMU; $opts: uefi (bool), memory (MiB), cpus, kvm (bool), firmware (ścieżka lub null), display ("none"|null)
+func qemuArgs($c, $iso, $opts): array {
+    $arch = util.get($c, "distro.arch");
+    $mem = strval($opts["memory"] ?? 2048);
+    $cpus = strval($opts["cpus"] ?? 2);
+    $a = [];
+    if ($arch === "x86_64") {
+        $a = ["qemu-system-x86_64", "-m", $mem, "-smp", $cpus, "-cdrom", $iso, "-boot", "d"];
+        if (($opts["kvm"] ?? false) === true) { $a = [...$a, "-enable-kvm", "-cpu", "host"]; }
+        if (($opts["uefi"] ?? false) === true) {
+            if (($opts["firmware"] ?? null) === null) { util.die("brak firmware UEFI (OVMF) — zainstaluj qemu-ovmf-x86_64 / ovmf albo podaj --firmware"); }
+            $a = [...$a, "-bios", $opts["firmware"]];
+        }
+    } else {
+        if (($opts["firmware"] ?? null) === null) { util.die("aarch64 wymaga firmware UEFI (AAVMF): --firmware PLIK"); }
+        $a = ["qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-m", $mem, "-smp", $cpus, "-bios", $opts["firmware"], "-device", "virtio-gpu-pci", "-device", "qemu-xhci", "-device", "usb-kbd", "-drive", "file=" . $iso . ",media=cdrom,if=none,id=cd", "-device", "usb-storage,drive=cd"];
+    }
+    if (($opts["display"] ?? null) === "none") { $a = [...$a, "-display", "none", "-serial", "stdio"]; }
+    return $a;
+}
