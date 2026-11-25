@@ -1,0 +1,54 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.config;
+
+##
+ * doctor — sprawdzenie hosta budującego: narzędzia, uprawnienia, miejsce na dysku.
+##
+
+# [polecenie, pakiet openSUSE, wymagane w kontekście]
+func tools($c) {
+    $fmts = util.asList(util.get($c, "build.formats"));
+    $iso = in_array("iso", $fmts);
+    $t = [
+        ["bash", "bash", true], ["zypper", "zypper", true], ["rpm", "rpm", true], ["chroot", "coreutils", true],
+        ["mount", "util-linux", true], ["umount", "util-linux", true], ["cp", "coreutils", true], ["truncate", "coreutils", true],
+        ["mksquashfs", "squashfs", $iso || in_array("squashfs", $fmts)], ["sha256sum", "coreutils", util.get($c, "checksums.sha256")],
+        ["xorriso", "xorriso", $iso], ["mkfs.vfat", "dosfstools", $iso && util.get($c, "boot.uefi")],
+        ["mmd", "mtools", $iso && util.get($c, "boot.uefi")], ["mcopy", "mtools", $iso && util.get($c, "boot.uefi")],
+        ["git", "git", util.get($c, "init.system") === "zenitd" && util.get($c, "init.source") === "git"],
+        ["z#", "(Z# — https://github.com/Zenit-Linux/Z-Sharp)", util.get($c, "init.system") === "zenitd" && util.get($c, "init.build")],
+        ["zpm", "zpm (Zenit Package Manager)", config.manager($c) === "zpm"], ["rpmbuild", "rpm-build (atrapa zpm)", config.manager($c) === "zpm"],
+        ["tar", "tar", in_array("tar", $fmts)], ["zstd", "zstd", in_array("tar", $fmts)], ["gpg", "gpg2", util.get($c, "checksums.sign_key", "") !== ""]
+    ];
+    return $t;
+}
+
+func check($c) {
+    $rows = [];
+    $missing = 0;
+    foreach (tools($c) as $t) {
+        $p = $t[0] === "zpm" ? config.zpmBin($c) : Os.which($t[0]);
+        $ok = $p !== null;
+        if (!$ok && $t[2]) { $missing++; }
+        $rows[] = ["name" => $t[0], "ok" => $ok, "required" => $t[2], "pkg" => $t[1], "path" => $p];
+    }
+    $grub = Os.which("grub2-mkimage") ?? Os.which("grub-mkimage");
+    $needGrub = in_array("iso", util.asList(util.get($c, "build.formats")));
+    if ($grub === null && $needGrub) { $missing++; }
+    $rows[] = ["name" => "grub2-mkimage", "ok" => $grub !== null, "required" => $needGrub, "pkg" => "grub2 grub2-" . (util.get($c, "distro.arch") === "x86_64" ? "i386-pc grub2-x86_64-efi" : "arm64-efi"), "path" => $grub];
+    return ["rows" => $rows, "missing" => $missing];
+}
+
+func report($c) {
+    $r = check($c);
+    foreach ($r["rows"] as $row) {
+        $mark = $row["ok"] ? util.paint("32", "ok     ") : ($row["required"] ? util.paint("31", "BRAK   ") : util.paint("33", "brak    "));
+        eecho($mark . " " . pad2($row["name"], 14) . ($row["ok"] ? $row["path"] : "zainstaluj: " . $row["pkg"]));
+    }
+    $uid = Process.run("id", ["-u"]);
+    if (trim($uid["stdout"]) !== "0") { util.warn("budowa wymaga roota (chroot, mount, zypper --root); uruchom przez sudo albo w kontenerze --privileged"); }
+    return $r["missing"];
+}
+
+func pad2($s, $n) { while (strlen($s) < $n) { $s .= " "; } return $s; }
