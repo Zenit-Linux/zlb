@@ -1,0 +1,88 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+import Workspace.config;
+
+##
+ * repos — repozytoria zypper w rootfs: domyślne Tumbleweed, własne z [repos.repo.<alias>], pliki repos.d/*.repo, klucze GPG.
+##
+
+func defaultRepos($c) {
+    if (!util.get($c, "repos.defaults")) { return []; }
+    $m = rtrimSlash(util.get($c, "repos.mirror"));
+    $base = util.get($c, "distro.arch") === "x86_64" ? $m . "/tumbleweed/repo" : $m . "/ports/aarch64/tumbleweed/repo";
+    return [
+        ["alias" => "repo-oss", "name" => "openSUSE Tumbleweed OSS", "url" => $base . "/oss/", "priority" => 99, "enabled" => true, "gpgcheck" => true],
+        ["alias" => "repo-non-oss", "name" => "openSUSE Tumbleweed non-OSS", "url" => $base . "/non-oss/", "priority" => 99, "enabled" => true, "gpgcheck" => true]
+    ];
+}
+
+func rtrimSlash($s) { return util.rtrim2(strval($s)); }
+
+# lista wszystkich repozytoriów (domyślne + własne; własne o tym samym aliasie nadpisują domyślne)
+func all($c) {
+    $by = [];
+    $order = [];
+    foreach (defaultRepos($c) as $r) { $by[$r["alias"]] = $r; $order[] = $r["alias"]; }
+    $custom = util.get($c, "repos.repo", []);
+    if (is_array($custom)) {
+        foreach ($custom as $alias => $r) {
+            $d = ["alias" => $alias, "name" => $alias, "priority" => 99, "enabled" => true, "gpgcheck" => util.get($c, "repos.gpgcheck")];
+            $by[$alias] = util.merge($d, $r);
+            $by[$alias]["alias"] = $alias;
+            if (!in_array($alias, $order)) { $order[] = $alias; }
+        }
+    }
+    $out = [];
+    foreach ($order as $a) { $out[] = $by[$a]; }
+    return $out;
+}
+
+func zypperBase($x) {
+    $root = $x->rootfs();
+    $cache = util.pjoin($x->p["cache_dir"], "zypp-pkgs");
+    $a = $x->manager() === "zpm"
+        ? [$x->zpmBin(), "--profile", config.zpmProfile($x->c), "--root", $root, "--non-interactive", "--pkg-cache-dir", $cache]
+        : ["zypper", "--root", $root, "--non-interactive", "--pkg-cache-dir", $cache];
+    if ($x->cfg("repos.gpg_auto_import")) { $a[] = "--gpg-auto-import-keys"; }
+    return $a;
+}
+
+func importKeys($x) {
+    $dir = $x->p["keys"];
+    if (!Os.isDir($dir)) { return 0; }
+    $n = 0;
+    foreach (Os.list($dir) as $f) {
+        if (ends_with($f, ".asc") || ends_with($f, ".gpg") || ends_with($f, ".key")) {
+            $x->r->run(["rpm", "--root", $x->rootfs(), "--import", util.pjoin($dir, $f)]);
+            $n++;
+        }
+    }
+    return $n;
+}
+
+func setup($x) {
+    $root = $x->rootfs();
+    $x->r->mkdir(util.pjoin($root, "etc/zypp/repos.d"));
+    $x->r->mkdir($x->p["cache_dir"]);
+    $x->r->run(["rpm", "--root", $root, "--initdb"]);
+    importKeys($x);
+    $base = zypperBase($x);
+    foreach (all($x->c) as $r) {
+        $x->r->run([...$base, "removerepo", $r["alias"]], ["ok" => true]);   # idempotentne przy wznowieniu
+        $args = [...$base, "addrepo", "--refresh", "--name", $r["name"], "--priority", strval($r["priority"])];
+        if (!$r["gpgcheck"]) { $args[] = "--no-gpgcheck"; }
+        if (!$r["enabled"]) { $args[] = "--disable"; }
+        $args[] = $r["url"];
+        $args[] = $r["alias"];
+        $x->r->run($args);
+    }
+    # dodatkowe pliki .repo (np. generowane przez projekt)
+    $d = $x->p["repos"];
+    if (Os.isDir($d)) {
+        foreach (Os.list($d) as $f) {
+            if (ends_with($f, ".repo")) { $x->r->cpa(util.pjoin($d, $f), util.pjoin($root, "etc/zypp/repos.d/" . $f)); }
+        }
+    }
+    $x->r->run([...$base, "refresh", "--force"]);
+}
