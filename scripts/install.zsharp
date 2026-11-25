@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Instalacja zlb: binarka standalone (jeśli jest) albo wrapper uruchamiający źródła przez zsc0.
+# Użycie: [DESTDIR=/tmp/pkg] [PREFIX=/usr/local] scripts/install.sh [--bundle]   (--bundle: zbuduj binarkę zsc + zsc0 bundle)
+set -eu
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+PREFIX="${PREFIX:-/usr/local}"; DESTDIR="${DESTDIR:-}"
+if [ "${1:-}" = "--bundle" ] || [ ! -x "$HERE/zlb" ]; then
+    if command -v zsc >/dev/null && command -v zsc0 >/dev/null; then
+        (cd "$HERE" && zsc build src/main.zsharp --emit zbc -o zlb.zbc && zsc0 bundle zlb.zbc -o zlb)
+    fi
+fi
+install -d "$DESTDIR$PREFIX/bin" "$DESTDIR$PREFIX/share/zlb"
+if [ -x "$HERE/zlb" ]; then
+    install -m 0755 "$HERE/zlb" "$DESTDIR$PREFIX/bin/zlb"
+else
+    install -d "$DESTDIR$PREFIX/share/zlb/src"
+    cp -a "$HERE/src" "$HERE/Z#.toml" "$DESTDIR$PREFIX/share/zlb/"
+    printf '#!/bin/sh\nexec zsc0 run %s/share/zlb/src/main.zsharp "$@"\n' "$PREFIX" > "$DESTDIR$PREFIX/bin/zlb"
+    chmod 0755 "$DESTDIR$PREFIX/bin/zlb"
+fi
+cp -a "$HERE/examples" "$DESTDIR$PREFIX/share/zlb/"
+echo "zlb zainstalowany w ${DESTDIR:-/}$PREFIX"
