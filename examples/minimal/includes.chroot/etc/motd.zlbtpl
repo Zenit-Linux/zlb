@@ -1,0 +1,1 @@
+Witaj w {{distro.name}} {{distro.version}} ({{init.system}}).
