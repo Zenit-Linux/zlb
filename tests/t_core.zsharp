@@ -1,0 +1,255 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.config;
+import Workspace.pkglist;
+import Workspace.overlay;
+import Workspace.image;
+import Workspace.cli;
+import Workspace.runner;
+import Workspace.ctx;
+import Workspace.hooks;
+import Workspace.packages;
+import Workspace.repos;
+import Workspace.scaffold;
+import Workspace.manifest;
+import Workspace.verify;
+import Workspace.build;
+
+$fails = 0;
+func eq($name, $got, $want) {
+    if ($got === $want) { echo "ok   " . $name; return 0; }
+    echo "FAIL " . $name . " got=" . dump2($got) . " want=" . dump2($want);
+    return 1;
+}
+func dump2($v) { return is_array($v) ? "[" . join(map($v, fn($x) => dump2($x)), ",") . "]" : strval($v); }
+func throws($name, $fn, $frag) {
+    try { $fn(); } catch (Exception $e) {
+        if (contains($e->getMessage(), $frag)) { echo "ok   " . $name; return 0; }
+        echo "FAIL " . $name . " zły komunikat: " . $e->getMessage(); return 1;
+    }
+    echo "FAIL " . $name . " brak wyjątku"; return 1;
+}
+
+$tmp = Os.mkdtemp("zlbt-");
+
+# ── util ──
+$fails += eq("shq", util.shq("a'b"), "'a'\\''b'");
+$fails += eq("pjoin", util.pjoin("/a/", "/b", "", "c"), "/a/b/c");
+$fails += eq("merge deep", util.merge(["a" => ["b" => 1, "c" => 2]], ["a" => ["b" => 9]])["a"]["c"], 2);
+$fails += eq("merge override list", util.merge(["l" => [1, 2]], ["l" => [3]])["l"], [3]);
+$fails += eq("get path", util.get(["a" => ["b" => 5]], "a.b"), 5);
+$fails += eq("get default", util.get(["a" => 1], "x.y", "d"), "d");
+$fails += eq("uniq", util.uniq(["a", "b", "a"]), ["a", "b"]);
+$fails += eq("stripComment", util.stripComment("pkg # note"), "pkg");
+$fails += eq("stripComment hash in word", util.stripComment("a#b"), "a#b");
+$fails += eq("lines", util.lines("a\nb\n"), ["a", "b"]);
+$fails += eq("humanSize", util.humanSize(1536), "1.5 KiB");
+$fails += eq("fmt", util.fmt("{id}-{v}", ["id" => "z", "v" => 1]), "z-1");
+$fails += eq("without", util.without(["a", "b", "c"], ["b"]), ["a", "c"]);
+
+# ── config ──
+Os.writeFile($tmp . "/zlb.toml", "[distro]\nname = \"T\"\nid = \"t\"\nversion = \"1.0\"\n[init]\nsystem = \"systemd\"\n[build]\nformats = [\"iso\", \"squashfs\"]\n");
+$c = config.load($tmp . "/zlb.toml");
+$fails += eq("cfg default arch", $c["distro"]["arch"], "x86_64");
+$fails += eq("cfg label derived", $c["distro"]["iso_label"], "T_10");
+$fails += eq("cfg iso name", config.isoName($c), "t-1.0-x86_64.iso");
+$fails += eq("cfg formats", $c["build"]["formats"], ["iso", "squashfs"]);
+$fails += eq("cfg paths rootfs", ends_with($c["_paths"]["rootfs"], "/build/rootfs"), true);
+$c2 = config.load($tmp . "/zlb.toml", ["distro.version=2.0", "boot.timeout=9", "build.tags=a,b", "boot.bios=false"]);
+$fails += eq("override str", $c2["distro"]["version"], "2.0");
+$fails += eq("override int", $c2["boot"]["timeout"], 9);
+$fails += eq("override list", $c2["build"]["tags"], ["a", "b"]);
+$fails += eq("override bool", $c2["boot"]["bios"], false);
+Os.writeFile($tmp . "/bad.toml", "[distro]\nid = \"T X\"\nversion = \"\"\narch = \"mips\"\n");
+$fails += throws("cfg invalid", fn() => config.load($tmp . "/bad.toml"), "distro.arch");
+Os.writeFile($tmp . "/bad2.toml", "[distro]\nid = \"t\"\nversion = \"1\"\n[init]\nsystem = \"zenitd\"\nsource = \"path\"\n");
+$fails += throws("cfg zenitd path needed", fn() => config.load($tmp . "/bad2.toml"), "init.path");
+Os.writeFile($tmp . "/bad3.toml", "[distro]\nid = \"t\"\nversion = \"1\"\narch = \"aarch64\"\n");
+$fails += throws("cfg aarch64 bios", fn() => config.load($tmp . "/bad3.toml"), "aarch64");
+
+# ── pkglist ──
+Os.mkdir($tmp . "/packages");
+Os.writeFile($tmp . "/packages/zlb.list", "# base\nbash coreutils # inline\n@pattern:base\n-systemd\n!udev-extra\n[arch=x86_64] ucode-intel\n[arch=aarch64] raspberrypi-firmware\n[arch!=aarch64,tag=gui] xorg\n[profile=live] live-only\nfoo@packman\n%include extra.list\nbash\n");
+Os.writeFile($tmp . "/packages/extra.list", "[init=zenitd] zenit-extra\nextra-pkg\n");
+$r = pkglist.parse($tmp . "/packages/zlb.list", ["arch" => "x86_64", "profile" => "live", "init" => "zenitd", "tags" => ["gui"]]);
+$fails += eq("pk install", $r["install"], ["bash", "coreutils", "ucode-intel", "xorg", "live-only", "zenit-extra", "extra-pkg"]);
+$fails += eq("pk patterns", $r["patterns"], ["base"]);
+$fails += eq("pk lock", $r["lock"], ["systemd"]);
+$fails += eq("pk remove", $r["remove"], ["udev-extra"]);
+$fails += eq("pk from", $r["from"]["packman"], ["foo"]);
+$fails += eq("pk files", count($r["files"]), 2);
+$r2 = pkglist.parse($tmp . "/packages/zlb.list", ["arch" => "aarch64", "profile" => "server", "init" => "systemd", "tags" => []]);
+$fails += eq("pk aarch64", $r2["install"], ["bash", "coreutils", "raspberrypi-firmware", "extra-pkg"]);
+Os.writeFile($tmp . "/packages/loop.list", "%include loop.list\n");
+$fails += throws("pk loop", fn() => pkglist.parse($tmp . "/packages/loop.list", ["arch" => "x86_64"]), "%include");
+Os.writeFile($tmp . "/packages/bad.list", "[arch=x86_64 foo\n");
+$fails += throws("pk bad cond", fn() => pkglist.parse($tmp . "/packages/bad.list", ["arch" => "x86_64"]), "bad.list:1");
+Os.writeFile($tmp . "/packages/conf.list", "foo\n-foo\n");
+$fails += throws("pk conflict", fn() => pkglist.parse($tmp . "/packages/conf.list", ["arch" => "x86_64"]), "blokowane");
+Os.writeFile($tmp . "/packages/key.list", "[color=red] foo\n");
+$fails += throws("pk bad key", fn() => pkglist.parse($tmp . "/packages/key.list", ["arch" => "x86_64"]), "nieznany klucz");
+
+# ── overlay szablony ──
+$fails += eq("render", overlay.render("Hi {{distro.name}} {{ init.system }}!", $c), "Hi T systemd!");
+$fails += throws("render unknown", fn() => overlay.render("{{no.such}}", $c), "nieznany klucz");
+
+# ── image ──
+$fails += eq("gmtStamp", image.gmtStamp(1700000000), "2023111422132000");
+$fails += eq("gmtStamp epoch0", image.gmtStamp(0), "1970010100000000");
+$fails += eq("gmtStamp leap", image.gmtStamp(1709164800), "2024022900000000");
+
+# ── cli ──
+$p = cli.parseArgs(["build", "-C", "/x", "--set", "a=1", "--set=b=2", "--dry-run", "--from", "repos", "--tag", "gui", "--tag=x"]);
+$fails += eq("cli cmd", $p["cmd"], "build");
+$fails += eq("cli project", $p["flags"]["project"], "/x");
+$fails += eq("cli set", $p["set"], ["a=1", "b=2"]);
+$fails += eq("cli dry", $p["flags"]["dry-run"], true);
+$fails += eq("cli from", $p["flags"]["from"], "repos");
+$fails += eq("cli tags", $p["tags"], ["gui", "x"]);
+$fails += throws("cli missing val", fn() => cli.parseArgs(["build", "--from"]), "wymaga wartości");
+
+# ── runner / hooki / grub / xorriso na prawdziwym projekcie ze scaffoldu ──
+$r0 = new Runner(false);
+scaffold.create($tmp . "/proj", "zenit", $r0);
+$cz = config.load($tmp . "/proj/zlb.toml");
+$x = new Ctx($cz, new Runner(true), []);
+$fails += eq("init system", $x->initSystem(), "zenitd");
+$fails += eq("hooks after.packages", count(hooks.forStage($x, "after.packages")), 1);
+$fails += eq("hooks chroot (loose)", hooks.forStage($x, "chroot")[0]["name"], "50-motd.sh");
+$fails += eq("hooks host stage", hooks.forStage($x, "post-image")[0]["where"], "host");
+$fails += eq("hooks lint clean", count(hooks.lint($x)), 0);
+$cfgText = image.grubCfg($x, true);
+$fails += eq("grub label", contains($cfgText, "--label ZENIT_202611"), true);
+$fails += eq("grub init param", contains($cfgText, "init=/sbin/init"), true);
+$fails += eq("grub rescue", contains($cfgText, "zenit.unit=rescue"), true);
+$fails += eq("grub verbose drops quiet", contains(explodeAt($cfgText, "(verbose)"), "quiet"), false);
+$fails += eq("grub fwsetup", contains($cfgText, "fwsetup"), true);
+$xo = image.xorrisoArgs($x, "/o.iso");
+$fails += eq("xorriso hybrid", in_array("-isohybrid-mbr", $xo) && in_array("-isohybrid-gpt-basdat", $xo), true);
+$fails += eq("xorriso out", $xo[count($xo) - 2], "/o.iso");
+$cu = config.load($tmp . "/proj/zlb.toml", ["boot.bios=false"]);
+$xu = new Ctx($cu, new Runner(true), []);
+$fails += eq("uefi only no mbr", in_array("-isohybrid-mbr", image.xorrisoArgs($xu, "/o.iso")), false);
+
+# runner: log do pliku + kod wyjścia + env + capture
+$lr = new Runner(false, $tmp . "/run.log");
+$fails += eq("runner exec rc", $lr->run(["sh", "-c", "echo hello; exit 0"]), 0);
+$fails += eq("runner log written", contains(Os.readFile($tmp . "/run.log"), "hello"), true);
+$fails += eq("runner nonzero ok", $lr->run(["sh", "-c", "exit 3"], ["ok" => true]), 3);
+$fails += throws("runner nonzero throws", fn() => $lr->run(["sh", "-c", "exit 4"]), "kodem 4");
+$fails += eq("runner env", (new Runner(false))->capture(["sh", "-c", "echo \$ZZ"], ["env" => ["ZZ" => "v"]])["stdout"], "v\n");
+
+# overlay naprawdę (bez roota): kopiowanie + szablon
+$x2 = new Ctx($cz, new Runner(false), []);
+$n = overlay.apply($x2, $tmp . "/proj/includes.chroot", $tmp . "/rootout");
+$fails += eq("overlay tpl count", $n, 1);
+$fails += eq("overlay rendered", Os.readFile($tmp . "/rootout/etc/motd"), "Witaj w Zenit Linux 2026.11 (zenitd).\n");
+$fails += eq("overlay no tpl leftover", Os.exists($tmp . "/rootout/etc/motd.zlbtpl"), false);
+$fails += eq("overlay plain copy", Os.isFile($tmp . "/rootout/etc/sudoers.d/10-wheel"), true);
+
+
+# ── init / menedżer pakietów ──
+func cfgWith($tmp, $over) { return config.load($tmp . "/proj/zlb.toml", $over); }
+Os.writeFile($tmp . "/badacct.toml", "[distro]\nid = \"t\"\nversion = \"1\"\n[[users.account]]\nname = \"Bad Name\"\n");
+$cz2 = cfgWith($tmp, []);
+$fails += eq("systemdFree zenitd", config.systemdFree($cz2), true);
+$fails += eq("initPath zenitd", config.initPath($cz2), "/sbin/init");
+$fails += eq("zpmProfile zenitd", config.zpmProfile($cz2), "zenitd");
+$fails += eq("manager explicit zpm", config.manager(cfgWith($tmp, ["packages.manager=zpm"])), "zpm");
+$fails += eq("manager explicit zypper", config.manager(cfgWith($tmp, ["packages.manager=zypper"])), "zypper");
+$fails += eq("manager auto without zpm in PATH", config.manager(cfgWith($tmp, ["zpm.binary=/nonexistent/zpm"])), "zypper");
+Os.writeFile($tmp . "/fakezpm", "#!/bin/sh\n"); Os.chmod($tmp . "/fakezpm", 493);
+$fails += eq("manager auto with zpm binary", config.manager(cfgWith($tmp, ["zpm.binary=" . $tmp . "/fakezpm"])), "zpm");
+$cs = cfgWith($tmp, ["init.system=systemd"]);
+$fails += eq("systemd: not free", config.systemdFree($cs), false);
+$fails += eq("systemd: manager zypper", config.manager($cs), "zypper");
+$fails += eq("systemd: no init param", config.initPath($cs), "");
+$fails += eq("systemd: zpm profile", config.zpmProfile($cs), "systemd");
+$cc = cfgWith($tmp, ["init.system=custom", "init.custom.init_path=/sbin/openrc-init"]);
+$fails += eq("custom: free by default", config.systemdFree($cc), true);
+$fails += eq("custom: init path", config.initPath($cc), "/sbin/openrc-init");
+$fails += eq("custom: zpm profile nosystemd", config.zpmProfile($cc), "nosystemd");
+$fails += eq("custom: initName", config.initName($cc), "custom");
+$fails += eq("custom: name override", config.initName(cfgWith($tmp, ["init.system=custom", "init.custom.init_path=/x", "init.name=openrc"])), "openrc");
+$fails += eq("custom: profile override", config.zpmProfile(cfgWith($tmp, ["init.system=custom", "init.custom.init_path=/x", "init.profile=s6"])), "s6");
+$fails += throws("custom needs init_path", fn() => cfgWith($tmp, ["init.system=custom"]), "init_path");
+$fails += throws("bad manager", fn() => cfgWith($tmp, ["packages.manager=apt"]), "packages.manager");
+$xc = new Ctx($cc, new Runner(true), []);
+$fails += eq("pkgCtx init uses name", $xc->pkgCtx()["init"], "custom");
+$fails += eq("grub custom init param", contains(image.grubCfg($xc, false), "init=/sbin/openrc-init"), true);
+$xs = new Ctx($cs, new Runner(true), []);
+$fails += eq("grub systemd no init param", contains(image.grubCfg($xs, false), "init=/"), false);
+# warunek [init=…] w liście pakietów z custom.name
+Os.writeFile($tmp . "/packages/init.list", "[init=zenitd] a\n[init=openrc] b\n[init=systemd] c\n");
+$fails += eq("pkg init cond name", pkglist.parse($tmp . "/packages/init.list", ["arch" => "x86_64", "init" => "openrc"])["install"], ["b"]);
+# custom: pakiety init dodane do listy
+Os.writeFile($tmp . "/p2.toml", "[distro]\nid = \"t\"\nversion = \"1\"\n[init]\nsystem = \"custom\"\n[init.custom]\ninit_path = \"/sbin/x-init\"\npackages = [\"x-init\"]\n[packages]\nlist = \"packages/zlb.list\"\n");
+Os.mkdir($tmp . "/pp"); Os.mkdir($tmp . "/pp/packages"); Os.writeFile($tmp . "/pp/packages/zlb.list", "bash\n"); Os.writeFile($tmp . "/pp/zlb.toml", Os.readFile($tmp . "/p2.toml"));
+$xp = new Ctx(config.load($tmp . "/pp/zlb.toml"), new Runner(true), []);
+$fails += eq("custom packages merged", packages.resolve($xp)["install"], ["bash", "x-init"]);
+
+# ── repos: zypperBase przez zpm ──
+$xz = new Ctx(cfgWith($tmp, ["packages.manager=zpm"]), new Runner(true), []);
+$zb = repos.zypperBase($xz);
+$fails += eq("zypperBase zpm prog", $zb[0], "zpm");
+$fails += eq("zypperBase zpm profile", $zb[1] . " " . $zb[2], "--profile zenitd");
+$fails += eq("zypperBase zypper prog", repos.zypperBase(new Ctx(cfgWith($tmp, ["packages.manager=zypper"]), new Runner(true), []))[0], "zypper");
+
+# ── manifest / verify (czyste) ──
+$man = ["bash 5.2-1 x86_64", "systemd 255-1 x86_64", "libsystemd0 255-1 x86_64", "systemd-sysvcompat 255-1 noarch", "udev 255-1 x86_64"];
+$fails += eq("leaks zenitd", manifest.leaks($man, $cz2), ["systemd", "systemd-sysvcompat"]);
+$fails += eq("leaks systemd init none", manifest.leaks($man, $cs), []);
+$d = manifest.diff(["a 1 x", "b 1 x", "c 1 x"], ["a 1 x", "b 2 x", "d 1 x"]);
+$fails += eq("diff added", $d["added"], ["d"]);
+$fails += eq("diff removed", $d["removed"], ["c"]);
+$fails += eq("diff changed", $d["changed"]["b"], ["1", "2"]);
+$et = "Boot record  : El Torito , MBR cyl-align-on GPT\nVolume id    : 'ZENIT_202611'\nEl Torito boot img :   1  BIOS  y   none  0x0000  0x00      4         100\nEl Torito boot img :   2  UEFI  y   none  0x0000  0x00   5648         188\n";
+$fails += eq("el torito parse", verify.parseElTorito($et), ["bios" => true, "uefi" => true]);
+$fails += eq("el torito uefi only", verify.parseElTorito("El Torito boot img :   1  UEFI  y\n"), ["bios" => false, "uefi" => true]);
+$fails += eq("volume id", verify.parseVolumeId($et), "ZENIT_202611");
+$fails += eq("volume id none", verify.parseVolumeId("nic"), null);
+$q = verify.qemuArgs($cz2, "/x.iso", ["memory" => 1024, "cpus" => 4, "kvm" => true]);
+$fails += eq("qemu bios", $q, ["qemu-system-x86_64", "-m", "1024", "-smp", "4", "-cdrom", "/x.iso", "-boot", "d", "-enable-kvm", "-cpu", "host"]);
+$fails += eq("qemu uefi bios flag", in_array("-bios", verify.qemuArgs($cz2, "/x.iso", ["uefi" => true, "firmware" => "/o.fd"])), true);
+$fails += throws("qemu uefi needs fw", fn() => verify.qemuArgs($cz2, "/x.iso", ["uefi" => true]), "OVMF");
+$fails += eq("qemu headless", in_array("-serial", verify.qemuArgs($cz2, "/x.iso", ["display" => "none"])), true);
+
+# ── walidacja pól trafiających do powłoki/plików ──
+$fails += throws("hostname empty", fn() => cfgWith($tmp, ["distro.hostname="]), "distro.hostname");
+$fails += throws("hostname space", fn() => cfgWith($tmp, ["distro.hostname=a b"]), "distro.hostname");
+$fails += throws("timezone injection", fn() => cfgWith($tmp, ["distro.timezone=UTC;rm -rf /"]), "distro.timezone");
+$fails += throws("timezone dotdot", fn() => cfgWith($tmp, ["distro.timezone=../../etc/passwd"]), "distro.timezone");
+$fails += eq("timezone ok", cfgWith($tmp, ["distro.timezone=Europe/Warsaw"])["distro"]["timezone"], "Europe/Warsaw");
+$fails += throws("live user bad", fn() => cfgWith($tmp, ["live.user=Root;x"]), "live.user");
+$fails += eq("user ok", config.userOk("live_1-a"), true);
+$fails += eq("user digit first", config.userOk("1abc"), false);
+$fails += throws("account bad name", fn() => config.load($tmp . "/badacct.toml"), "users.account");
+
+# ── blokada budowy ──
+$xl = new Ctx($cz2, new Runner(false), []);
+$xl->p["work_dir"] = $tmp . "/wd";
+build.acquireLock($xl);
+$fails += eq("lock created", Os.isFile($tmp . "/wd/.lock"), true);
+$fails += throws("lock held by live pid", fn() => build.acquireLock($xl), "trwa już budowa");
+build.releaseLock($xl);
+$fails += eq("lock released", Os.isFile($tmp . "/wd/.lock"), false);
+Os.writeFile($tmp . "/wd/.lock", "999999999\n");
+build.acquireLock($xl);
+$fails += eq("stale lock replaced", trim(Os.readFile($tmp . "/wd/.lock")) !== "999999999", true);
+build.releaseLock($xl);
+
+# ── unmountTree: nic nie jest zamontowane pod katalogiem tymczasowym ──
+$fails += eq("unmountTree empty", (new Runner(false))->unmountTree($tmp . "/proj"), []);
+
+# ── scaffold custom ──
+scaffold.create($tmp . "/pc", "custom", $r0);
+$ccu = config.load($tmp . "/pc/zlb.toml");
+$fails += eq("template custom init", $ccu["init"]["system"], "custom");
+$fails += eq("template custom path", config.initPath($ccu), "/sbin/openrc-init");
+$fails += eq("template zenit list cond", contains(Os.readFile($tmp . "/proj/packages/zlb.list"), "[init=zenitd] !systemd"), true);
+
+func explodeAt($s, $marker) { $i = index_of($s, $marker); return $i < 0 ? "" : substr($s, $i, 200); }
+
+Os.removeAll($tmp);
+echo "wynik: " . ($fails === 0 ? "wszystko OK" : $fails . " niepowodzeń");
+exit($fails === 0 ? 0 : 1);
