@@ -1,0 +1,53 @@
+import Workspace.util;
+import Workspace.config;
+
+##
+ * ctx — kontekst budowy przekazywany między etapami: konfiguracja, runner, ścieżki, opcje CLI, rozwiązana lista pakietów.
+##
+class Ctx {
+    public $c;
+    public $r;
+    public $p;
+    public $opts;
+    public $pkgs = null;
+    public $kver = "";
+
+    public function __construct($c, $r, $opts = []) {
+        $this->c = $c;
+        $this->r = $r;
+        $this->p = $c["_paths"];
+        $this->opts = $opts;
+    }
+
+    public function rootfs() { return $this->p["rootfs"]; }
+    public function isoroot() { return $this->p["isoroot"]; }
+    public function arch() { return $this->c["distro"]["arch"]; }
+    public function initSystem() { return $this->c["init"]["system"]; }
+    public function manager() { return config.manager($this->c); }
+    public function zpmBin() { return config.zpmBin($this->c) ?? "zpm"; }
+    public function cfg($path, $default = null) { return util.get($this->c, $path, $default); }
+
+    public function pkgCtx() {
+        return ["arch" => $this->arch(), "profile" => $this->cfg("build.profile"), "init" => config.initName($this->c), "tags" => util.asList($this->cfg("build.tags"))];
+    }
+
+    # zmienne środowiskowe widoczne dla hooków
+    public function hookEnv($stage) {
+        return [
+            "ZLB_STAGE" => $stage, "ZLB_ARCH" => $this->arch(), "ZLB_DISTRO_ID" => $this->cfg("distro.id"),
+            "ZLB_DISTRO_NAME" => $this->cfg("distro.name"), "ZLB_VERSION" => strval($this->cfg("distro.version")),
+            "ZLB_INIT" => $this->initSystem(), "ZLB_PROFILE" => $this->cfg("build.profile"),
+            "ZLB_HOSTNAME" => $this->cfg("distro.hostname"), "ZLB_LIVE_USER" => $this->cfg("live.user")
+        ];
+    }
+
+    public function hostEnv($stage) {
+        $e = $this->hookEnv($stage);
+        $e["ZLB_ROOTFS"] = $this->rootfs();
+        $e["ZLB_ISOROOT"] = $this->isoroot();
+        $e["ZLB_WORKDIR"] = $this->p["work_dir"];
+        $e["ZLB_OUTDIR"] = $this->p["output_dir"];
+        $e["ZLB_PROJECT"] = $this->c["_root"];
+        return $e;
+    }
+}
