@@ -1,0 +1,244 @@
+import Std.Os;
+import Std.Toml;
+import Std.Path;
+import Workspace.util;
+
+##
+ * config — wczytanie i walidacja zlb.toml, wartości domyślne, ścieżki względem katalogu projektu.
+##
+
+func defaults() {
+    return [
+        "distro" => [
+            "name" => "Zenit Linux", "id" => "zenit", "version" => "rolling", "codename" => "",
+            "arch" => "x86_64", "base" => "opensuse-tumbleweed",
+            "hostname" => "zenit", "locale" => "en_US.UTF-8", "keymap" => "us", "timezone" => "UTC",
+            "iso_label" => "", "publisher" => "Zenit Linux", "url" => ""
+        ],
+        "build" => [
+            "work_dir" => "build", "output_dir" => "out", "cache_dir" => ".zlb-cache",
+            "iso_name" => "{id}-{version}-{arch}.iso", "formats" => ["iso"],
+            "compression" => "zstd", "compression_level" => 19, "block_size" => "1M",
+            "profile" => "live", "tags" => [], "source_date_epoch" => ""
+        ],
+        "repos" => [ "defaults" => true, "mirror" => "https://download.opensuse.org", "gpg_auto_import" => true, "gpgcheck" => true ],
+        "packages" => [
+            "manager" => "auto", "list" => "packages/zlb.list", "recommends" => false, "vendor_change" => true,
+            "download_in_advance" => true, "lock" => [], "remove_nodeps" => [], "exclude_docs" => true
+        ],
+        "zpm" => [ "binary" => "", "install_in_image" => true ],
+        "init" => [
+            "system" => "zenitd", "name" => "", "profile" => "",
+            "custom" => [ "init_path" => "", "packages" => [], "post" => [], "block_systemd" => true ], "source" => "git", "repo" => "https://github.com/Zenit-Linux/zenitd.git",
+            "ref" => "main", "path" => "", "binary" => "", "build" => true, "build_cmd" => "z# build --release",
+            "installer" => "scripts/install.sh", "prefix" => "/usr", "compat" => true,
+            "default_target" => "multi-user", "enable" => ["getty@tty1"], "remove_systemd" => true,
+            "systemd_packages" => ["systemd", "systemd-sysvcompat"]
+        ],
+        "users" => [ "root_password_hash" => "", "lock_root" => false, "account" => [] ],
+        "live" => [
+            "enabled" => true, "user" => "live", "password_hash" => "", "groups" => ["wheel", "audio", "video"],
+            "autologin" => true, "overlay" => "tmpfs", "kernel_params" => ["rd.live.image", "quiet"]
+        ],
+        "initrd" => [
+            "tool" => "dracut", "add" => ["dmsquash-live"], "omit" => ["systemd", "systemd-initrd", "systemd-networkd", "plymouth"],
+            "extra_args" => []
+        ],
+        "boot" => [
+            "bios" => true, "uefi" => true, "secure_boot" => false, "timeout" => 5, "menu_title" => "",
+            "kernel_params" => [], "grub_theme" => ""
+        ],
+        "dirs" => [
+            "after_packages" => "after.packages", "hooks" => "hooks", "includes_chroot" => "includes.chroot",
+            "includes_iso" => "includes.iso", "keys" => "keys", "repos" => "repos.d", "boot" => "boot"
+        ],
+        "cleanup" => [
+            "paths" => ["/var/cache/zypp", "/var/log/zypp", "/tmp", "/var/tmp", "/root/.bash_history"],
+            "truncate_logs" => true, "reset_machine_id" => true, "remove_ssh_host_keys" => true
+        ],
+        "checksums" => [ "sha256" => true, "sign_key" => "" ]
+    ];
+}
+
+func validate($c): array {
+    $e = [];
+    $arch = util.get($c, "distro.arch");
+    if (!in_array($arch, ["x86_64", "aarch64"])) { $e[] = "distro.arch: nieobsługiwana architektura '" . strval($arch) . "' (x86_64, aarch64)"; }
+    if (!charsOk(util.get($c, "distro.hostname", ""), "")) { $e[] = "distro.hostname: niepuste, dozwolone [A-Za-z0-9.-]"; }
+    $tz = util.get($c, "distro.timezone", "");
+    if (!charsOk($tz, "/_+") || contains($tz, "..") || starts_with($tz, "/")) { $e[] = "distro.timezone: np. Europe/Warsaw (bez '..', bez wiodącego '/')"; }
+    if (!charsOk(util.get($c, "distro.keymap", ""), "_")) { $e[] = "distro.keymap: niepuste, dozwolone [A-Za-z0-9._-]"; }
+    if (!charsOk(util.get($c, "distro.locale", ""), "_@")) { $e[] = "distro.locale: np. en_US.UTF-8"; }
+    if (util.get($c, "live.enabled") === true && !userOk(util.get($c, "live.user", ""))) { $e[] = "live.user: nazwa użytkownika [a-z_][a-z0-9_-]*"; }
+    if (!preg_ok(util.get($c, "distro.id", ""))) { $e[] = "distro.id: dozwolone [a-z0-9._-], niepuste"; }
+    if (strval(util.get($c, "distro.version", "")) === "") { $e[] = "distro.version: wymagane"; }
+    if (util.get($c, "distro.base") !== "opensuse-tumbleweed") { $e[] = "distro.base: obsługiwane tylko 'opensuse-tumbleweed'"; }
+    if (!in_array(util.get($c, "init.system"), ["zenitd", "systemd", "custom", "none"])) { $e[] = "init.system: zenitd | systemd | custom | none"; }
+    if (!in_array(util.get($c, "packages.manager"), ["auto", "zypper", "zpm"])) { $e[] = "packages.manager: auto | zypper | zpm"; }
+    if (util.get($c, "init.system") === "custom" && !starts_with(strval(util.get($c, "init.custom.init_path", "")), "/")) { $e[] = "init.custom.init_path: wymagana ścieżka bezwzględna (np. /sbin/openrc-init) dla init.system = custom"; }
+    if (!in_array(util.get($c, "init.source"), ["git", "path"])) { $e[] = "init.source: git | path"; }
+    if (util.get($c, "init.system") === "zenitd") {
+        $src = util.get($c, "init.source");
+        if ($src === "path" && util.get($c, "init.path", "") === "") { $e[] = "init.path: wymagane dla source=path"; }
+        if (!util.get($c, "init.build") && util.get($c, "init.binary", "") === "") { $e[] = "init.binary: wymagane, gdy init.build = false"; }
+        if ($src === "git" && util.get($c, "init.repo", "") === "") { $e[] = "init.repo: wymagane dla source=git"; }
+    }
+    if (!in_array(util.get($c, "build.compression"), ["zstd", "xz", "gzip", "lz4"])) { $e[] = "build.compression: zstd | xz | gzip | lz4"; }
+    foreach (util.asList(util.get($c, "build.formats")) as $f) {
+        if (!in_array($f, ["iso", "squashfs", "tar", "rootfs"])) { $e[] = "build.formats: nieznany format '" . $f . "'"; }
+    }
+    if (!util.get($c, "boot.bios") && !util.get($c, "boot.uefi")) { $e[] = "boot: włącz przynajmniej bios albo uefi"; }
+    if ($arch === "aarch64" && util.get($c, "boot.bios")) { $e[] = "boot.bios: niedostępne na aarch64 (ustaw bios = false)"; }
+    foreach (util.asList(util.get($c, "users.account")) as $i => $a) {
+        if (!is_array($a) || !has_key($a, "name")) { $e[] = "users.account[" . $i . "]: brak 'name'"; }
+        elseif (!userOk($a["name"])) { $e[] = "users.account[" . $i . "].name: nazwa użytkownika [a-z_][a-z0-9_-]*"; }
+    }
+    if (is_array(util.get($c, "repos.repo"))) {
+        foreach (util.get($c, "repos.repo") as $k => $r) {
+            if (!is_array($r) || !has_key($r, "url")) { $e[] = "repos.repo." . $k . ": brak 'url'"; }
+        }
+    }
+    return $e;
+}
+
+func preg_ok($id): bool {
+    if (!is_string($id) || $id === "") { return false; }
+    foreach (chars($id) as $ch) {
+        if (!(is_alnum($ch) && lower($ch) === $ch) && $ch !== "." && $ch !== "_" && $ch !== "-") { return false; }
+    }
+    return true;
+}
+
+##
+ * Wczytuje plik manifestu; zwraca cfg z kluczami dodatkowymi:
+ *   _root (katalog projektu), _file, a ścieżki dirs.* / build.*_dir rozwiązane do bezwzględnych w _paths.
+##
+func load(string $file, $over = []) {
+    if (!Os.isFile($file)) { util.die("brak manifestu: " . $file); }
+    $raw = null;
+    try { $raw = Toml.decode(Os.readFile($file)); }
+    catch (Exception $e) { util.die($file . ": " . $e->getMessage()); }
+    $c = util.merge(defaults(), $raw);
+    foreach ($over as $o) { $c = setOverride($c, $o); }
+    $root = Os.realpath(Path.dirname($file));
+    return finalize($c, $root, $file);
+}
+
+func finalize($c, $root, $file) {
+    $errs = validate($c);
+    if (count($errs) > 0) { util.die($file . ":\n  - " . join($errs, "\n  - ")); }
+    if (util.get($c, "distro.iso_label", "") === "") {
+        $l = upper(replace(util.get($c, "distro.id"), "-", "_")) . "_" . replace(strval(util.get($c, "distro.version")), ".", "");
+        $c["distro"]["iso_label"] = substr($l, 0, 32);
+    }
+    if (strlen($c["distro"]["iso_label"]) > 32) { util.die("distro.iso_label: maks. 32 znaki (limit ISO9660)"); }
+    if (strval(util.get($c, "zpm.binary", "")) !== "") { $c["zpm"]["binary"] = util.absPath($c["zpm"]["binary"], $root); }
+    $c["_root"] = $root;
+    $c["_file"] = $file;
+    $p = [];
+    foreach ($c["dirs"] as $k => $v) { $p[$k] = util.absPath($v, $root); }
+    foreach (["work_dir", "output_dir", "cache_dir"] as $k) { $p[$k] = util.absPath($c["build"][$k], $root); }
+    $p["rootfs"] = util.pjoin($p["work_dir"], "rootfs");
+    $p["isoroot"] = util.pjoin($p["work_dir"], "isoroot");
+    $p["state"] = util.pjoin($p["work_dir"], ".state");
+    $p["log"] = util.pjoin($p["work_dir"], "zlb.log");
+    $p["pkglist"] = util.absPath($c["packages"]["list"], $root);
+    $c["_paths"] = $p;
+    return $c;
+}
+
+func isoName($c): string {
+    return util.fmt(util.get($c, "build.iso_name"), [
+        "id" => util.get($c, "distro.id"), "version" => util.get($c, "distro.version"),
+        "arch" => util.get($c, "distro.arch"), "date" => Os.env("ZLB_DATE", "")
+    ]);
+}
+
+# --set a.b.c=wartość  (bool/int rozpoznawane; lista po przecinku gdy klucz jest listą w domyślnych)
+func setOverride($c, string $kv) {
+    $i = index_of($kv, "=");
+    if ($i < 1) { util.die("--set oczekuje klucz=wartość, jest: " . $kv); }
+    $key = substr($kv, 0, $i);
+    $val = substr($kv, $i + 1);
+    $cur = util.get(defaults(), $key);
+    $v = $val;
+    if ($val === "true") { $v = true; }
+    elseif ($val === "false") { $v = false; }
+    elseif (is_int($cur) && intval($val) . "" === $val) { $v = intval($val); }
+    elseif (is_array($cur)) { $v = $val === "" ? [] : split($val, ","); }
+    $segs = split($key, ".");
+    return putPath($c, $segs, $v);
+}
+
+func putPath($c, $segs, $v) {
+    if (count($segs) === 0) { return $v; }
+    $head = $segs[0];
+    $base = is_array($c) ? $c : [];
+    $child = has_key($base, $head) ? $base[$head] : [];
+    $base[$head] = putPath($child, array_slice($segs, 1), $v);
+    return $base;
+}
+
+# ── init i menedżer pakietów ──
+# nazwa init widoczna w warunkach [init=...] listy pakietów (init.name, a gdy puste — init.system)
+func initName($c): string {
+    $n = strval(util.get($c, "init.name", ""));
+    return $n !== "" ? $n : strval(util.get($c, "init.system"));
+}
+
+func zpmBin($c) {
+    $b = strval(util.get($c, "zpm.binary", ""));
+    if ($b !== "") { return Os.isFile($b) ? $b : null; }
+    return Os.which("zpm");
+}
+
+# true, gdy w obrazie ma nie być systemd
+func systemdFree($c): bool {
+    $s = util.get($c, "init.system");
+    if ($s === "zenitd") { return true; }
+    if ($s === "custom") { return util.get($c, "init.custom.block_systemd") === true; }
+    return false;
+}
+
+# "zypper" | "zpm"; auto = zpm, gdy obraz ma być bez systemd i zpm jest dostępny
+func manager($c): string {
+    $m = util.get($c, "packages.manager");
+    if ($m === "zypper" || $m === "zpm") { return $m; }
+    return (systemdFree($c) && zpmBin($c) !== null) ? "zpm" : "zypper";
+}
+
+func zpmProfile($c): string {
+    $p = strval(util.get($c, "init.profile", ""));
+    if ($p !== "") { return $p; }
+    $s = util.get($c, "init.system");
+    if ($s === "zenitd") { return "zenitd"; }
+    if ($s === "systemd") { return "systemd"; }
+    return systemdFree($c) ? "nosystemd" : "systemd";
+}
+
+# ścieżka init przekazywana jądru (init=); "" = domyślna jądra
+func initPath($c): string {
+    $s = util.get($c, "init.system");
+    if ($s === "zenitd") { return "/sbin/init"; }
+    if ($s === "custom") { return strval(util.get($c, "init.custom.init_path", "")); }
+    return "";
+}
+
+# niepusty tekst z liter/cyfr oraz '.', '-' i znaków z $extra (wartości trafiają do plików i poleceń — nie przepuszczamy powłoki)
+func charsOk($s, string $extra): bool {
+    if (!is_string($s) || $s === "") { return false; }
+    foreach (chars($s) as $ch) {
+        if (!is_alnum($ch) && $ch !== "." && $ch !== "-" && !contains($extra, $ch)) { return false; }
+    }
+    return true;
+}
+
+func userOk($s): bool {
+    if (!is_string($s) || $s === "") { return false; }
+    $first = substr($s, 0, 1);
+    if (!(is_alpha($first) && lower($first) === $first) && $first !== "_") { return false; }
+    foreach (chars($s) as $ch) {
+        if (!((is_alnum($ch) && lower($ch) === $ch)) && $ch !== "_" && $ch !== "-") { return false; }
+    }
+    return true;
+}
