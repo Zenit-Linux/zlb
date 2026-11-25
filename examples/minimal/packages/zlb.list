@@ -1,0 +1,21 @@
+# packages/zlb.list — pakiety obrazu (składnia: docs/PACKAGES.md)
+# nazwa | @pattern:nazwa | -blokada | !usuń-po-instalacji | nazwa@repo | [arch=x86_64] nazwa | %include plik
+
+# baza
+openSUSE-release filesystem glibc glibc-locale-base timezone
+bash coreutils util-linux findutils grep sed gawk less nano which procps psmisc
+zypper rpm shadow sudo
+
+# jądro, firmware, initramfs live
+kernel-default kernel-firmware-all dracut kmod udev
+[arch=x86_64] ucode-intel ucode-amd
+
+# sieć
+iproute2 iputils dhcpcd openssh-server ca-certificates ca-certificates-mozilla
+
+# bootloader i narzędzia obrazu (potrzebne w systemie docelowym)
+grub2
+[arch=x86_64] grub2-i386-pc grub2-x86_64-efi shim
+
+# init systemd
+systemd systemd-sysvcompat
