@@ -1,0 +1,108 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+
+##
+ * hooks — skrypty użytkownika.
+ *
+ *   after.packages/NN-nazwa.sh   chroot, zaraz po instalacji pakietów (przed zenitd i overlayem)
+ *   hooks/NN-nazwa.sh            chroot, po zenitd/overlayu/użytkownikach (etap "chroot")
+ *   hooks/<etap>/NN-nazwa.sh     etapy: pre-bootstrap, post-bootstrap (host), chroot, pre-image, post-image (host)
+ *   przyrostek .chroot / .host   (np. 10-x.hook.host) wymusza miejsce wykonania niezależnie od katalogu
+ *   *.disabled, *~, .ukryte      pomijane;  kolejność = sortowanie po nazwie
+ * Hooki chroot dostają: ZLB_STAGE, ZLB_ARCH, ZLB_DISTRO_ID, ZLB_VERSION, ZLB_INIT, ZLB_PROFILE, ZLB_HOSTNAME, ZLB_LIVE_USER.
+ * Hooki host dodatkowo: ZLB_ROOTFS, ZLB_ISOROOT, ZLB_WORKDIR, ZLB_OUTDIR, ZLB_PROJECT.
+##
+
+func stages() { return ["pre-bootstrap", "post-bootstrap", "chroot", "pre-image", "post-image"]; }
+
+func hostStage($stage): bool { return $stage !== "chroot"; }
+
+func skip($name): bool {
+    return starts_with($name, ".") || ends_with($name, "~") || ends_with($name, ".disabled") || ends_with($name, ".md") || ends_with($name, ".txt") || ends_with($name, ".bak");
+}
+
+# [["path","name","where"]] posortowane po nazwie; where = "chroot" | "host"
+func scan($dir, $defaultWhere) {
+    $out = [];
+    if (!Os.isDir($dir)) { return $out; }
+    foreach (Os.list($dir) as $n) {
+        $full = util.pjoin($dir, $n);
+        if (skip($n) || !Os.isFile($full)) { continue; }
+        $where = $defaultWhere;
+        if (ends_with($n, ".chroot")) { $where = "chroot"; }
+        elseif (ends_with($n, ".host")) { $where = "host"; }
+        $out[] = ["path" => $full, "name" => $n, "where" => $where];
+    }
+    return $out;
+}
+
+func forStage($x, $stage) {
+    $hd = $x->p["hooks"];
+    if ($stage === "after.packages") { return scan($x->p["after_packages"], "chroot"); }
+    $list = [];
+    if (Os.isDir(util.pjoin($hd, $stage))) { $list = scan(util.pjoin($hd, $stage), hostStage($stage) ? "host" : "chroot"); }
+    if ($stage === "chroot") { $list = [...scan($hd, "chroot"), ...$list]; }
+    return $list;
+}
+
+func runChroot($x, $h, $stage) {
+    $root = $x->rootfs();
+    $tmp = util.pjoin($root, "tmp/zlb-hooks");
+    $x->r->mkdir($tmp);
+    $dst = util.pjoin($tmp, $h["name"]);
+    $x->r->cpa($h["path"], $dst);
+    $x->r->run(["chmod", "0755", $dst]);
+    try {
+        $x->r->chroot($root, ["/tmp/zlb-hooks/" . $h["name"]], ["env" => $x->hookEnv($stage)]);
+    } finally {
+        $x->r->rmrf($tmp);
+    }
+}
+
+func runHost($x, $h, $stage) {
+    $x->r->run([$h["path"]], ["env" => $x->hostEnv($stage)]);
+}
+
+##
+ * Uruchamia hooki etapu. Chroot-hooki wymagają zamontowanych API jądra: wywołujący (build) montuje je przed etapem.
+##
+func runStage($x, $stage) {
+    $list = forStage($x, $stage);
+    if (count($list) === 0) { util.debug("brak hooków: " . $stage); return 0; }
+    util.step("hooki: " . $stage . " (" . count($list) . ")");
+    foreach ($list as $h) {
+        util.info($h["name"] . " [" . $h["where"] . "]");
+        if ($h["where"] === "chroot") { runChroot($x, $h, $stage); }
+        else { runHost($x, $h, $stage); }
+    }
+    return count($list);
+}
+
+func needsChroot($x, $stage): bool {
+    foreach (forStage($x, $stage) as $h) { if ($h["where"] === "chroot") { return true; } }
+    return false;
+}
+
+# kontrola jakości: czy hooki są wykonywalne / mają shebang
+func lint($x) {
+    $issues = [];
+    foreach (concatStages($x) as $e) {
+        $h = $e[1];
+        $first = "";
+        $ls = Os.readLines($h["path"]);
+        if (count($ls) > 0) { $first = $ls[0]; }
+        if (!starts_with($first, "#!")) { $issues[] = $h["path"] . ": brak shebanga w pierwszej linii (hook jest uruchamiany bezpośrednio)"; }
+    }
+    return $issues;
+}
+
+func concatStages($x) {
+    $all = [];
+    foreach (array_merge2(["after.packages"], stages()) as $s) {
+        foreach (forStage($x, $s) as $h) { $all[] = [$s, $h]; }
+    }
+    return $all;
+}
+
+func array_merge2($a, $b) { return [...$a, ...$b]; }
