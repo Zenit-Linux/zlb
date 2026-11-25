@@ -1,0 +1,71 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+
+##
+ * scaffold — `zlb new KATALOG [--template zenit|minimal]`: szkielet projektu z całą strukturą katalogów.
+ * Szablon "zenit" jest tym samym, co examples/zenit w repozytorium.
+##
+
+func manifest($tpl) {
+    $init = $tpl === "zenit" ? "zenitd" : ($tpl === "custom" ? "custom" : "systemd");
+    $name = $tpl === "zenit" ? "Zenit Linux" : "My Distro";
+    $id = $tpl === "zenit" ? "zenit" : "mydistro";
+    $m = "# zlb.toml — główny manifest zlb (Zenit Linux Builder)\n# Pełna lista kluczy i wartości domyślnych: docs/MANIFEST.md\n\n";
+    $m .= "[distro]\nname = \"" . $name . "\"\nid = \"" . $id . "\"\nversion = \"2026.11\"\narch = \"x86_64\"\nhostname = \"" . $id . "\"\nlocale = \"en_US.UTF-8\"\nkeymap = \"us\"\ntimezone = \"UTC\"\n\n";
+    $m .= "[build]\nformats = [\"iso\"]            # iso | squashfs | tar | rootfs\ncompression = \"zstd\"\ncompression_level = 19\nprofile = \"live\"\niso_name = \"{id}-{version}-{arch}.iso\"\n\n";
+    $m .= "[packages]\nlist = \"packages/zlb.list\"\nrecommends = false\nmanager = \"auto\"          # auto | zypper | zpm — auto: zpm dla obrazów bez systemd, gdy jest w PATH\n";
+    $m .= "\n[init]\nsystem = \"" . $init . "\"          # zenitd | systemd | custom | none\n";
+    if ($tpl === "custom") {
+        $m .= "# własny init (przykład: OpenRC — nazwy pakietów zweryfikuj w swoim repozytorium)\nprofile = \"nosystemd\"        # profil zpm\n\n[init.custom]\ninit_path = \"/sbin/openrc-init\"   # parametr jądra init=\npackages = [\"openrc\"]\nblock_systemd = true\npost = [\"rc-update add devfs sysinit || true\"]   # polecenia w chroot po instalacji\n";
+    }
+    if ($tpl === "zenit") {
+        $m .= "source = \"git\"\nrepo = \"https://github.com/Zenit-Linux/zenitd.git\"\nref = \"main\"\nbuild = true              # host musi mieć z# (z# build --release)\ncompat = true             # systemctl/journalctl/reboot... jako aplety zenitd\ndefault_target = \"multi-user\"\nenable = [\"getty@tty1\"]\nremove_systemd = true\n";
+    }
+    $m .= "\n[live]\nenabled = true\nuser = \"live\"\nautologin = true\n\n[boot]\nbios = true\nuefi = true\ntimeout = 5\n";
+    return $m;
+}
+
+func pkgList($tpl) {
+    $l = "# packages/zlb.list — pakiety obrazu (składnia: docs/PACKAGES.md)\n# nazwa | @pattern:nazwa | -blokada | !usuń-po-instalacji | nazwa@repo | [arch=x86_64] nazwa | %include plik\n\n";
+    $l .= "# baza\nopenSUSE-release filesystem glibc glibc-locale-base timezone\nbash coreutils util-linux findutils grep sed gawk less nano which procps psmisc\nzypper rpm shadow sudo\n\n";
+    $l .= "# jądro, firmware, initramfs live\nkernel-default kernel-firmware-all dracut kmod udev\n[arch=x86_64] ucode-intel ucode-amd\n\n";
+    $l .= "# sieć\niproute2 iputils dhcpcd openssh-server ca-certificates ca-certificates-mozilla\n\n";
+    $l .= "# bootloader i narzędzia obrazu (potrzebne w systemie docelowym)\ngrub2\n[arch=x86_64] grub2-i386-pc grub2-x86_64-efi shim\n";
+    if ($tpl === "zenit") { $l .= "\n# systemd bywa wciągany jako zależność: zpm (atrapa + blokady) albo, bez zpm, rpm -e --nodeps po instalacji\n[init=zenitd] !systemd\n"; }
+    elseif ($tpl === "custom") { $l .= "\n# pakiety init.custom.packages dodawane są automatycznie; systemd blokuje zpm (block_systemd)\n[init=custom] !systemd\n"; }
+    else { $l .= "\n# init systemd\nsystemd systemd-sysvcompat\n"; }
+    return $l;
+}
+
+func files($tpl) {
+    $f = [];
+    $f["zlb.toml"] = manifest($tpl);
+    $f["packages/zlb.list"] = pkgList($tpl);
+    $f["after.packages/README.md"] = "Skrypty uruchamiane w chroot zaraz po instalacji pakietów (kolejność wg nazwy: 10-*.sh, 20-*.sh).\nMuszą mieć shebang (#!/bin/sh). Zmienne: ZLB_STAGE, ZLB_ARCH, ZLB_DISTRO_ID, ZLB_VERSION, ZLB_INIT, ZLB_PROFILE.\n";
+    $f["after.packages/10-example.sh"] = "#!/bin/sh\n# przykład: wygeneruj locale i cache czcionek\nset -eu\necho \"after.packages: \$ZLB_DISTRO_ID \$ZLB_VERSION (init=\$ZLB_INIT)\"\n";
+    $f["hooks/README.md"] = "hooks/NN-nazwa.sh        → chroot (po init/overlay/użytkownikach)\nhooks/<etap>/NN-nazwa.sh → etapy: pre-bootstrap, post-bootstrap, chroot, pre-image, post-image (poza chroot tylko host)\nPrzyrostek .host / .chroot wymusza miejsce wykonania. Pliki *.disabled są pomijane.\n";
+    $f["hooks/50-motd.sh"] = "#!/bin/sh\nset -eu\n# przykładowy hook: znacznik wersji obrazu\necho \"\$ZLB_DISTRO_NAME \$ZLB_VERSION\" > /etc/zlb-release\n";
+    $f["hooks/post-image/90-report.host"] = "#!/bin/sh\nset -eu\necho \"obraz gotowy w \$ZLB_OUTDIR\"\n";
+    $f["includes.chroot/etc/motd.zlbtpl"] = "Witaj w {{distro.name}} {{distro.version}} ({{init.system}}).\n";
+    $f["includes.chroot/etc/sudoers.d/10-wheel"] = "%wheel ALL=(ALL:ALL) ALL\n";
+    $f["includes.iso/README.txt"] = "Pliki z tego katalogu trafiają do korzenia ISO.\n";
+    $f["keys/README.md"] = "Klucze GPG repozytoriów (*.asc, *.gpg, *.key) — importowane do bazy rpm w rootfs przed instalacją.\n";
+    $f["repos.d/README.md"] = "Dodatkowe pliki *.repo kopiowane do /etc/zypp/repos.d w rootfs. Prościej: tabele [repos.repo.<alias>] w zlb.toml.\n";
+    $f["boot/README.md"] = "Zarezerwowane na motyw GRUB i pliki rozruchowe (boot.grub_theme).\n";
+    $f[".gitignore"] = "/build/\n/out/\n/.zlb-cache/\n";
+    return $f;
+}
+
+func create($dir, $tpl, $r) {
+    if (!in_array($tpl, ["zenit", "minimal", "custom"])) { util.die("nieznany szablon: " . $tpl . " (zenit, minimal, custom)"); }
+    if (Os.exists($dir) && count(Os.list($dir)) > 0) { util.die($dir . " nie jest pusty"); }
+    $n = 0;
+    foreach (files($tpl) as $rel => $data) {
+        $path = util.pjoin($dir, $rel);
+        $r->mkdir(Path.dirname($path));
+        $r->write($path, $data, ends_with($rel, ".sh") || ends_with($rel, ".host") ? 493 : 420);
+        $n++;
+    }
+    return $n;
+}
