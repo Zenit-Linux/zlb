@@ -1,0 +1,31 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.repos;
+
+##
+ * cleanup — sprzątanie rootfs przed spakowaniem: cache zypper, logi, machine-id, klucze SSH hosta, tmp, resolv.conf.
+##
+
+func run($x) {
+    $root = $x->rootfs();
+    $x->r->run([...repos.zypperBase($x), "clean", "--all"], ["ok" => true]);
+    foreach (util.asList($x->cfg("cleanup.paths")) as $p) {
+        if ($p === "/tmp" || $p === "/var/tmp") {
+            $x->r->sh("find " . util.shq($root . $p) . " -mindepth 1 -delete 2>/dev/null || true");
+        } else {
+            $x->r->rmrf($root . $p);
+        }
+    }
+    if ($x->cfg("cleanup.truncate_logs")) {
+        $x->r->sh("find " . util.shq($root . "/var/log") . " -type f -exec truncate -s0 {} + 2>/dev/null || true");
+    }
+    if ($x->cfg("cleanup.reset_machine_id")) {
+        $x->r->write(util.pjoin($root, "etc/machine-id"), "", 420);
+        $x->r->rmrf(util.pjoin($root, "var/lib/dbus/machine-id"));
+    }
+    if ($x->cfg("cleanup.remove_ssh_host_keys")) {
+        $x->r->sh("rm -f " . util.shq($root) . "/etc/ssh/ssh_host_*");
+    }
+    $x->r->rmrf(util.pjoin($root, "etc/resolv.conf"));
+    $x->r->rmrf(util.pjoin($root, "tmp/zlb-hooks"));
+}
