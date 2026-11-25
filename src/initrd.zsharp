@@ -1,0 +1,51 @@
+import Std.Os;
+import Workspace.util;
+
+##
+ * initrd — initramfs live przez dracut w chroot. Bez systemd w initrd: moduł dmsquash-live na ścieżce sysv-owej
+ * (własny /init dracuta), a moduły systemd* są omijane (omit).
+##
+
+func detectKernel($x) {
+    $d = util.pjoin($x->rootfs(), "lib/modules");
+    if ($x->r->dry) { $x->kver = "0.0.0-dry"; return $x->kver; }
+    if (!Os.isDir($d)) { util.die("brak " . $d . " — dodaj kernel-default do packages/zlb.list"); }
+    $vs = sort(values(filter(Os.list($d), fn($n) => Os.isDir(util.pjoin($d, $n)))));
+    if (count($vs) === 0) { util.die("brak jądra w " . $d); }
+    $x->kver = $vs[count($vs) - 1];
+    return $x->kver;
+}
+
+func omitList($x) {
+    $o = util.asList($x->cfg("initrd.omit"));
+    if ($x->initSystem() === "systemd") { $o = util.without($o, ["systemd", "systemd-initrd"]); }
+    return $o;
+}
+
+func addList($x) {
+    $a = util.asList($x->cfg("initrd.add"));
+    if ($x->cfg("live.enabled") && !in_array("dmsquash-live", $a)) { $a[] = "dmsquash-live"; }
+    return $a;
+}
+
+func build($x) {
+    $v = detectKernel($x);
+    util.info("jądro: " . $v);
+    $args = ["dracut", "--force", "--no-hostonly", "--no-hostonly-cmdline", "--kver", $v];
+    if (count(addList($x)) > 0) { $args[] = "--add"; $args[] = join(addList($x), " "); }
+    if (count(omitList($x)) > 0) { $args[] = "--omit"; $args[] = join(omitList($x), " "); }
+    $drivers = util.asList($x->cfg("initrd.drivers", ["squashfs", "overlay", "loop", "isofs", "sr_mod", "sd_mod", "ahci", "nvme", "usb_storage", "uas", "virtio_blk", "virtio_scsi", "xhci_pci"]));
+    if (count($drivers) > 0) { $args[] = "--add-drivers"; $args[] = join($drivers, " "); }
+    $args = [...$args, ...util.asList($x->cfg("initrd.extra_args")), "/boot/initrd-" . $v];
+    $x->r->chroot($x->rootfs(), $args);
+    if (!$x->r->dry && !Os.isFile(util.pjoin($x->rootfs(), "boot/initrd-" . $v))) { util.die("dracut nie utworzył /boot/initrd-" . $v); }
+}
+
+# ścieżki jądra i initrd względem rootfs
+func findKernelFile($x) {
+    $v = $x->kver;
+    foreach (["boot/vmlinuz-" . $v, "boot/Image-" . $v, "boot/vmlinuz", "boot/Image"] as $c) {
+        if ($x->r->dry || Os.exists(util.pjoin($x->rootfs(), $c))) { return $c; }
+    }
+    util.die("nie znaleziono pliku jądra w /boot dla " . $v);
+}
