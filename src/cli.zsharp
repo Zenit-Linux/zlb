@@ -1,0 +1,230 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+import Workspace.runner;
+import Workspace.config;
+import Workspace.ctx;
+import Workspace.packages;
+import Workspace.hooks;
+import Workspace.build;
+import Workspace.doctor;
+import Workspace.scaffold;
+import Workspace.verify;
+import Workspace.manifest;
+
+func version(): string { return "zlb 0.1.0"; }
+
+func usage(): void {
+    echo "zlb — Zenit Linux Builder: obrazy ISO z openSUSE Tumbleweed (zenitd zamiast systemd)";
+    echo "";
+    echo "użycie: zlb <polecenie> [opcje]";
+    echo "";
+    echo "  new KATALOG [--template zenit|minimal|custom]   szkielet projektu";
+    echo "  build                                    zbuduj obraz(y)";
+    echo "  check                                    waliduj manifest, listę pakietów i hooki";
+    echo "  list-packages                            rozwiązana lista pakietów";
+    echo "  stages                                   etapy budowy";
+    echo "  doctor                                   sprawdź narzędzia hosta";
+    echo "  chroot                                   powłoka w rootfs (po budowie / do debugowania)";
+    echo "  verify [ISO]                             sprawdź gotowe ISO (suma, BIOS/UEFI, etykieta, jądro, brak systemd)";
+    echo "  run [ISO] [--uefi] [--memory MiB] [--cpus N] [--firmware PLIK]   uruchom obraz w QEMU";
+    echo "  diff STARY.packages NOWY.packages        różnice między manifestami pakietów dwóch obrazów";
+    echo "  clean [--all]                            usuń katalog roboczy (--all: też out/ i cache)";
+    echo "  version | help";
+    echo "";
+    echo "opcje wspólne:";
+    echo "  -C, --project KATALOG    katalog projektu (domyślnie .)";
+    echo "  -f, --config PLIK        manifest (domyślnie zlb.toml)";
+    echo "  --set klucz=wartość      nadpisanie klucza manifestu (powtarzalne), np. --set distro.version=2026.12";
+    echo "  --profile P  --arch A  --tag T   skróty dla build.profile / distro.arch / build.tags";
+    echo "opcje build:";
+    echo "  --dry-run                tylko pokaż polecenia, nic nie wykonuj";
+    echo "  --resume                 wznów (pomiń etapy z znacznikiem .done)";
+    echo "  --from E  --until E  --only E    zakres etapów";
+    echo "  --no-check               pomiń kontrolę narzędzi hosta";
+    echo "  -v, --verbose            pokaż każde polecenie";
+}
+
+# flagi z wartością; reszta to przełączniki
+func valueFlags() { return ["--memory", "--cpus", "--firmware", "-C", "--project", "-f", "--config", "--set", "--profile", "--arch", "--tag", "--from", "--until", "--only", "--template"]; }
+
+func parseArgs($argv) {
+    $r = ["cmd" => null, "pos" => [], "flags" => [], "set" => [], "tags" => []];
+    $n = count($argv);
+    for ($i = 0; $i < $n; $i++) {
+        $a = $argv[$i];
+        if (starts_with($a, "-") && strlen($a) > 1) {
+            $name = $a;
+            $val = null;
+            $eq = index_of($a, "=");
+            if (starts_with($a, "--") && $eq > 0) { $name = substr($a, 0, $eq); $val = substr($a, $eq + 1); }
+            if (in_array($name, valueFlags())) {
+                if ($val === null) {
+                    if ($i + 1 >= $n) { util.die("opcja " . $name . " wymaga wartości"); }
+                    $i++;
+                    $val = $argv[$i];
+                }
+                if ($name === "--set") { $r["set"][] = $val; }
+                elseif ($name === "--tag") { $r["tags"][] = $val; }
+                else { $r["flags"][canon($name)] = $val; }
+            } else {
+                $r["flags"][canon($name)] = true;
+            }
+        } elseif ($r["cmd"] === null) {
+            $r["cmd"] = $a;
+        } else {
+            $r["pos"][] = $a;
+        }
+    }
+    return $r;
+}
+
+func canon($n) {
+    if ($n === "-C" || $n === "--project") { return "project"; }
+    if ($n === "-f" || $n === "--config") { return "config"; }
+    if ($n === "-v" || $n === "--verbose") { return "verbose"; }
+    if ($n === "-h" || $n === "--help") { return "help"; }
+    return starts_with($n, "--") ? substr($n, 2) : substr($n, 1);
+}
+
+func loadConfig($p) {
+    $proj = $p["flags"]["project"] ?? ".";
+    $file = $p["flags"]["config"] ?? "zlb.toml";
+    $path = starts_with($file, "/") ? $file : util.pjoin($proj, $file);
+    $over = $p["set"];
+    if (has_key($p["flags"], "profile")) { $over[] = "build.profile=" . $p["flags"]["profile"]; }
+    if (has_key($p["flags"], "arch")) { $over[] = "distro.arch=" . $p["flags"]["arch"]; }
+    if (count($p["tags"]) > 0) { $over[] = "build.tags=" . join($p["tags"], ","); }
+    return config.load($path, $over);
+}
+
+func makeCtx($p, $dry) {
+    $c = loadConfig($p);
+    return new Ctx($c, new Runner($dry), $p["flags"]);
+}
+
+func cmdCheck($p) {
+    $x = makeCtx($p, true);
+    $pk = packages.resolve($x);
+    util.info("manifest: " . $x->c["_file"] . " — OK");
+    util.info("lista pakietów: " . count($pk["files"]) . " plik(ów), " . count($pk["install"]) . " pakietów, " . count($pk["patterns"]) . " wzorców");
+    $issues = hooks.lint($x);
+    foreach ($issues as $i) { util.warn($i); }
+    $n = 0;
+    foreach (hooks.concatStages($x) as $e) { $n++; }
+    util.info("hooki: " . $n . ", ostrzeżeń: " . count($issues));
+    foreach (["after_packages", "hooks", "includes_chroot", "includes_iso", "keys", "repos", "boot"] as $d) {
+        if (!Os.isDir($x->p[$d])) { util.debug("brak katalogu (opcjonalny): " . $x->p[$d]); }
+    }
+    $miss = doctor.check($x->c)["missing"];
+    if ($miss > 0) { util.warn("na tym hoście brakuje " . $miss . " wymaganych narzędzi (zlb doctor)"); }
+    return 0;
+}
+
+func cmdListPackages($p) {
+    $x = makeCtx($p, true);
+    $pk = packages.resolve($x);
+    foreach ($pk["patterns"] as $n) { echo "pattern:" . $n; }
+    foreach ($pk["install"] as $n) { echo $n; }
+    foreach ($pk["from"] as $repo => $names) { foreach ($names as $n) { echo $n . "@" . $repo; } }
+    foreach ($pk["lock"] as $n) { echo "-" . $n; }
+    foreach ($pk["remove"] as $n) { echo "!" . $n; }
+    return 0;
+}
+
+func cmdBuild($p) {
+    if (($p["flags"]["verbose"] ?? false) === true) { Os.setEnv("ZLB_VERBOSE", "1"); }
+    $x = makeCtx($p, ($p["flags"]["dry-run"] ?? false) === true);
+    util.step(version() . " — " . $x->cfg("distro.name") . " " . strval($x->cfg("distro.version")) . " [" . $x->arch() . ", init=" . $x->initSystem() . "]");
+    build.run($x, $p["flags"]);
+    return 0;
+}
+
+func cmdClean($p) {
+    $c = loadConfig($p);
+    $r = new Runner(false);
+    $paths = $c["_paths"];
+    $r->unmountTree($paths["rootfs"]);
+    $r->rmrf($paths["work_dir"]);
+    if (($p["flags"]["all"] ?? false) === true) { $r->rmrf($paths["output_dir"]); $r->rmrf($paths["cache_dir"]); }
+    util.info("wyczyszczono");
+    return 0;
+}
+
+func cmdChroot($p) {
+    $x = makeCtx($p, false);
+    if (!Os.isDir($x->rootfs())) { util.die("brak rootfs: " . $x->rootfs() . " (zlb build)"); }
+    $m = (new ChrootMounts($x->r, $x->rootfs()))->mount();
+    $st = 0;
+    try { $st = Process.exec("chroot", [$x->rootfs(), "/bin/bash", "-l"]); }
+    finally { $m->unmount(); }
+    return $st;
+}
+
+func isoPath($p, $x) {
+    if (count($p["pos"]) > 0) { return $p["pos"][0]; }
+    return util.pjoin($x->p["output_dir"], config.isoName($x->c));
+}
+
+func cmdVerify($p) {
+    $x = makeCtx($p, false);
+    $rows = verify.verifyIso($x, isoPath($p, $x));
+    $bad = 0;
+    foreach ($rows as $r) {
+        if (!$r["ok"]) { $bad++; }
+        echo ($r["ok"] ? util.paint("32", "ok   ") : util.paint("31", "BŁĄD ")) . $r["name"] . ": " . $r["detail"];
+    }
+    return $bad > 0 ? 1 : 0;
+}
+
+func cmdRun($p) {
+    $x = makeCtx($p, false);
+    $iso = isoPath($p, $x);
+    if (!Os.isFile($iso)) { util.die("brak obrazu: " . $iso . " (zlb build)"); }
+    $uefi = ($p["flags"]["uefi"] ?? false) === true;
+    $fw = $p["flags"]["firmware"] ?? ($uefi || $x->arch() !== "x86_64" ? verify.ovmfPath() : null);
+    $opts = ["uefi" => $uefi, "memory" => intval($p["flags"]["memory"] ?? 2048), "cpus" => intval($p["flags"]["cpus"] ?? 2),
+        "kvm" => Os.isFile("/dev/kvm"), "firmware" => $fw];
+    $argv = verify.qemuArgs($x->c, $iso, $opts);
+    util.info(util.shjoin($argv));
+    return Process.exec($argv[0], array_slice($argv, 1));
+}
+
+func cmdDiff($p) {
+    if (count($p["pos"]) !== 2) { util.die("użycie: zlb diff STARY.packages NOWY.packages"); }
+    $d = manifest.diff(Os.readLines($p["pos"][0]), Os.readLines($p["pos"][1]));
+    foreach ($d["added"] as $n) { echo "+ " . $n; }
+    foreach ($d["removed"] as $n) { echo "- " . $n; }
+    foreach ($d["changed"] as $n => $v) { echo "~ " . $n . " " . $v[0] . " -> " . $v[1]; }
+    echo count($d["added"]) . " dodanych, " . count($d["removed"]) . " usuniętych, " . count($d["changed"]) . " zmienionych";
+    return 0;
+}
+
+func cmdNew($p) {
+    if (count($p["pos"]) !== 1) { util.die("użycie: zlb new KATALOG [--template zenit|minimal]"); }
+    $n = scaffold.create($p["pos"][0], $p["flags"]["template"] ?? "zenit", new Runner(false));
+    util.info("utworzono " . $n . " plików w " . $p["pos"][0]);
+    util.info("dalej: cd " . $p["pos"][0] . " && zlb check && sudo zlb build");
+    return 0;
+}
+
+func run($argv): int {
+    $p = parseArgs($argv);
+    $cmd = $p["cmd"];
+    if ($cmd === null && ($p["flags"]["version"] ?? false) === true) { echo version(); return 0; }
+    if (($p["flags"]["help"] ?? false) === true || $cmd === null || $cmd === "help") { usage(); return $cmd === null && !has_key($p["flags"], "help") ? 2 : 0; }
+    if ($cmd === "version" || ($p["flags"]["version"] ?? false) === true) { echo version(); return 0; }
+    if ($cmd === "new") { return cmdNew($p); }
+    if ($cmd === "build") { return cmdBuild($p); }
+    if ($cmd === "check") { return cmdCheck($p); }
+    if ($cmd === "list-packages") { return cmdListPackages($p); }
+    if ($cmd === "stages") { foreach (build.stageNames() as $s) { echo $s; } return 0; }
+    if ($cmd === "doctor") { return doctor.report(loadConfig($p)) > 0 ? 1 : 0; }
+    if ($cmd === "chroot") { return cmdChroot($p); }
+    if ($cmd === "clean") { return cmdClean($p); }
+    if ($cmd === "verify") { return cmdVerify($p); }
+    if ($cmd === "run") { return cmdRun($p); }
+    if ($cmd === "diff") { return cmdDiff($p); }
+    util.err("nieznane polecenie: " . $cmd . " (zlb help)");
+    return 2;
+}
