@@ -1,0 +1,49 @@
+import Workspace.util;
+import Workspace.config;
+
+##
+ * manifest — czyste funkcje na manifeście pakietów obrazu ("nazwa wersja arch" w linii): wykrywanie wycieku systemd, porównanie.
+##
+
+func names($lines): array {
+    $out = [];
+    foreach ($lines as $l) {
+        $t = trim($l);
+        if ($t === "") { continue; }
+        $f = split($t, " ");
+        $out[] = $f[0];
+    }
+    return $out;
+}
+
+func isSystemdPkg(string $n): bool { return $n === "systemd" || starts_with($n, "systemd-"); }
+
+# pakiety systemd w obrazie, który ma być bez systemd (libsystemd0/libudev1/udev to biblioteki i nie są wyciekiem)
+func leaks($lines, $c): array {
+    if (!config.systemdFree($c)) { return []; }
+    $out = [];
+    foreach (names($lines) as $n) { if (isSystemdPkg($n)) { $out[] = $n; } }
+    return sort($out);
+}
+
+func versions($lines): array {
+    $m = [];
+    foreach ($lines as $l) {
+        $f = split(trim($l), " ");
+        if (count($f) >= 2) { $m[$f[0]] = $f[1]; }
+    }
+    return $m;
+}
+
+# ["added" => [...], "removed" => [...], "changed" => ["nazwa" => [stara, nowa]]]
+func diff($old, $new): array {
+    $a = versions($old);
+    $b = versions($new);
+    $added = []; $removed = []; $changed = [];
+    foreach ($b as $n => $v) {
+        if (!has_key($a, $n)) { $added[] = $n; }
+        elseif ($a[$n] !== $v) { $changed[$n] = [$a[$n], $v]; }
+    }
+    foreach ($a as $n => $v) { if (!has_key($b, $n)) { $removed[] = $n; } }
+    return ["added" => sort($added), "removed" => sort($removed), "changed" => $changed];
+}
