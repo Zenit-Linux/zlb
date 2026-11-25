@@ -1,0 +1,89 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+import Workspace.config;
+
+##
+ * system — konfiguracja systemu w rootfs bez systemd-owych narzędzi (hostnamectl/localectl/timedatectl):
+ * hostname, locale, klawiatura, strefa czasowa, konta, użytkownik live z autologinem (getty zenitd).
+##
+
+func put($x, $rel, $data, $mode = 420) {
+    $path = util.pjoin($x->rootfs(), $rel);
+    $x->r->mkdir(Path.dirname($path));
+    $x->r->write($path, $data, $mode);
+}
+
+func basics($x) {
+    $h = $x->cfg("distro.hostname");
+    put($x, "etc/hostname", $h . "\n");
+    put($x, "etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n127.0.1.1 " . $h . "\n");
+    put($x, "etc/locale.conf", "LANG=" . $x->cfg("distro.locale") . "\n");
+    put($x, "etc/vconsole.conf", "KEYMAP=" . $x->cfg("distro.keymap") . "\n");
+    $tz = $x->cfg("distro.timezone");
+    $x->r->chrootSh($x->rootfs(), "test -e /usr/share/zoneinfo/" . $tz . " && ln -sfn /usr/share/zoneinfo/" . $tz . " /etc/localtime || echo 'uwaga: brak strefy " . $tz . " (pakiet timezone?)' >&2");
+    put($x, "etc/os-release.zlb", "ZLB_BUILD_PROFILE=" . $x->cfg("build.profile") . "\nZLB_INIT=" . $x->initSystem() . "\n");
+    put($x, "etc/machine-id", "");
+}
+
+func ensureGroup($x, $g) {
+    $x->r->chrootSh($x->rootfs(), "getent group " . util.shq($g) . " >/dev/null || groupadd " . util.shq($g));
+}
+
+func addAccount($x, $a) {
+    $name = $a["name"];
+    $groups = util.asList($a["groups"] ?? []);
+    if (($a["sudo"] ?? false) === true && !in_array("wheel", $groups)) { $groups[] = "wheel"; }
+    foreach ($groups as $g) { ensureGroup($x, $g); }
+    $args = ["useradd", "--create-home", "--shell", $a["shell"] ?? "/bin/bash"];
+    if (has_key($a, "uid")) { $args[] = "--uid"; $args[] = strval($a["uid"]); }
+    if (count($groups) > 0) { $args[] = "--groups"; $args[] = join($groups, ","); }
+    $args[] = $name;
+    $x->r->chroot($x->rootfs(), $args);
+    $hash = $a["password_hash"] ?? "";
+    if ($hash !== "") { $x->r->chroot($x->rootfs(), ["usermod", "--password", $hash, $name]); }
+    else { $x->r->chroot($x->rootfs(), ["passwd", "--delete", $name]); }
+    $keys = util.asList($a["ssh_keys"] ?? []);
+    if (count($keys) > 0) {
+        $home = "home/" . $name;
+        put($x, $home . "/.ssh/authorized_keys", join($keys, "\n") . "\n", 384);
+        $x->r->chroot($x->rootfs(), ["chown", "-R", $name . ":", "/" . $home . "/.ssh"]);
+        $x->r->chroot($x->rootfs(), ["chmod", "700", "/" . $home . "/.ssh"]);
+    }
+}
+
+func users($x) {
+    $hash = $x->cfg("users.root_password_hash");
+    if ($hash !== "") { $x->r->chroot($x->rootfs(), ["usermod", "--password", $hash, "root"]); }
+    if ($x->cfg("users.lock_root")) { $x->r->chroot($x->rootfs(), ["passwd", "--lock", "root"]); }
+    foreach (util.asList($x->cfg("users.account")) as $a) { addAccount($x, $a); }
+    if ($x->cfg("live.enabled") && $x->cfg("live.user") !== "") {
+        addAccount($x, ["name" => $x->cfg("live.user"), "groups" => $x->cfg("live.groups"), "password_hash" => $x->cfg("live.password_hash"), "sudo" => true]);
+        autologin($x);
+    }
+}
+
+# drop-in getty zenitd: ExecStart= (reset) + agetty --autologin
+func autologin($x) {
+    if (!$x->cfg("live.autologin") || $x->initSystem() !== "zenitd") { return false; }
+    put($x, "etc/zenit/system/getty@tty1.service.d/autologin.conf",
+        "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin " . $x->cfg("live.user") . " --noclear %I linux\n");
+    return true;
+}
+
+# zpm w obrazie: binarka + /etc/zpm/zpm.conf z profilem (atrapa i blokady już są w bazie rpm po etapie packages)
+func zpmInImage($x) {
+    if ($x->manager() !== "zpm" || !$x->cfg("zpm.install_in_image")) { return false; }
+    $bin = config.zpmBin($x->c);
+    if ($bin === null && !$x->r->dry) { util.die("zpm.install_in_image: nie znaleziono binarki zpm"); }
+    $x->r->mkdir(util.pjoin($x->rootfs(), "usr/bin"));
+    $x->r->run(["install", "-m", "0755", $bin ?? "zpm", util.pjoin($x->rootfs(), "usr/bin/zpm")]);
+    put($x, "etc/zpm/zpm.conf", "# zarządzane przez zpm\nprofile = \"" . config.zpmProfile($x->c) . "\"\n");
+    return true;
+}
+
+func configure($x) {
+    basics($x);
+    users($x);
+    zpmInImage($x);
+}
