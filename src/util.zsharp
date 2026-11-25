@@ -1,0 +1,122 @@
+import Std.Os;
+
+##
+ * util — małe, czyste pomocniki: cytowanie powłoki, logi, tablice, ścieżki.
+##
+
+class ZlbError extends Exception { }
+
+func die($msg) { throw new ZlbError($msg); }
+
+func shq($s): string { return "'" . replace(strval($s), "'", "'\\''") . "'"; }
+
+func shjoin($argv): string { return join(map($argv, fn($a) => shq($a)), " "); }
+
+func useColor(): bool {
+    if (Os.env("NO_COLOR") !== null) { return false; }
+    $t = Os.env("TERM", "dumb");
+    return $t !== "dumb" && Os.env("ZLB_COLOR", "1") !== "0";
+}
+
+func paint($code, $s) { return useColor() ? chr(27) . "[" . $code . "m" . $s . chr(27) . "[0m" : $s; }
+
+func step($s): void { eecho(paint("1;34", "==>") . " " . paint("1", $s)); }
+func info($s): void { eecho(paint("32", " ->") . " " . $s); }
+func warn($s): void { eecho(paint("33", "warn:") . " " . $s); }
+func err($s): void { eecho(paint("31", "błąd:") . " " . $s); }
+func debug($s): void { if (Os.env("ZLB_VERBOSE", "") === "1") { eecho(paint("2", "   " . $s)); } }
+
+# ── tablice ──
+func isList($a): bool {
+    if (!is_array($a)) { return false; }
+    $i = 0;
+    foreach ($a as $k => $v) { if ($k !== $i) { return false; } $i++; }
+    return true;
+}
+
+func isMap($a): bool { return is_array($a) && !isList($a); }
+
+# głębokie scalenie: tablice asocjacyjne rekurencyjnie, reszta (w tym listy) nadpisywana
+func merge($base, $over) {
+    if (!isMap($base) || !isMap($over)) { return $over; }
+    $out = $base;
+    foreach ($over as $k => $v) {
+        $out[$k] = (has_key($out, $k) && isMap($out[$k]) && isMap($v)) ? merge($out[$k], $v) : $v;
+    }
+    return $out;
+}
+
+# wartość pod ścieżką "a.b.c"
+func get($cfg, string $path, $default = null) {
+    $cur = $cfg;
+    foreach (split($path, ".") as $seg) {
+        if (!is_array($cur) || !has_key($cur, $seg)) { return $default; }
+        $cur = $cur[$seg];
+    }
+    return $cur;
+}
+
+func uniq($list) {
+    $seen = [];
+    $out = [];
+    foreach ($list as $x) {
+        if (!has_key($seen, strval($x))) { $seen[strval($x)] = true; $out[] = $x; }
+    }
+    return $out;
+}
+
+func concat($a, $b) { return [...$a, ...$b]; }
+
+func without($list, $drop) {
+    return values(filter($list, fn($x) => !in_array($x, $drop)));
+}
+
+func asList($v) { return $v === null ? [] : (is_array($v) ? values($v) : [$v]); }
+
+# ── tekst ──
+func lines(string $text) {
+    $out = [];
+    foreach (split(replace($text, "\r\n", "\n"), "\n") as $l) { $out[] = $l; }
+    if (count($out) > 0 && $out[count($out) - 1] === "") { $out = array_slice($out, 0, count($out) - 1); }
+    return $out;
+}
+
+func stripComment(string $l): string {
+    $n = strlen($l);
+    for ($i = 0; $i < $n; $i++) {
+        if (substr($l, $i, 1) === "#" && ($i === 0 || is_space(substr($l, $i - 1, 1)))) { return trim(substr($l, 0, $i)); }
+    }
+    return trim($l);
+}
+
+func padNum($n, $w = 2): string { return pad_left(strval($n), $w, "0"); }
+
+func fmt(string $tpl, $vars): string {
+    $out = $tpl;
+    foreach ($vars as $k => $v) { $out = replace($out, "{" . $k . "}", strval($v)); }
+    return $out;
+}
+
+# ── ścieżki ──
+func pjoin(...$parts): string {
+    $out = "";
+    foreach ($parts as $p) {
+        if ($p === "" || $p === null) { continue; }
+        if ($out === "") { $out = $p; }
+        else { $out = rtrim2($out) . "/" . ltrim2($p); }
+    }
+    return $out;
+}
+func rtrim2(string $s): string { while (strlen($s) > 1 && ends_with($s, "/")) { $s = substr($s, 0, strlen($s) - 1); } return $s; }
+func ltrim2(string $s): string { while (starts_with($s, "/")) { $s = substr($s, 1); } return $s; }
+
+func absPath(string $p, string $base): string { return starts_with($p, "/") ? $p : pjoin($base, $p); }
+
+func humanSize($bytes): string {
+    $units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    $v = $bytes; $i = 0;
+    while ($v >= 1024 && $i < 4) { $v = $v / 1024; $i++; }
+    return (is_int($v) ? strval($v) : strval(intval($v * 10) / 10)) . " " . $units[$i];
+}
+
+func hasStageName($stages, $name): bool { return in_array($name, $stages); }
