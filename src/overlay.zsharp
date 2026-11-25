@@ -1,0 +1,49 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+
+##
+ * overlay — nakładki plików: includes.chroot/ → rootfs, includes.iso/ → korzeń ISO.
+ * Pliki *.zlbtpl są szablonami: {{distro.name}}, {{distro.id}}, {{distro.version}}, {{distro.hostname}}, {{init.system}}...
+ * (dowolny klucz zlb.toml w notacji kropkowej); wynik ląduje pod nazwą bez .zlbtpl z zachowanymi uprawnieniami.
+##
+
+func render($text, $c) {
+    $out = "";
+    $i = 0;
+    $n = strlen($text);
+    while ($i < $n) {
+        $j = index_of(substr($text, $i), "{{");
+        if ($j < 0) { $out .= substr($text, $i); break; }
+        $out .= substr($text, $i, $j);
+        $rest = substr($text, $i + $j + 2);
+        $k = index_of($rest, "}}");
+        if ($k < 0) { util.die("szablon: niezamknięte '{{'"); }
+        $key = trim(substr($rest, 0, $k));
+        $v = util.get($c, $key);
+        if ($v === null || is_array($v)) { util.die("szablon: nieznany klucz '" . $key . "'"); }
+        $out .= strval($v);
+        $i = $i + $j + 2 + $k + 2;
+    }
+    return $out;
+}
+
+func apply($x, $srcDir, $dstDir) {
+    if (!Os.isDir($srcDir)) { return 0; }
+    $x->r->mkdir($dstDir);
+    $x->r->run(["cp", "-a", "--no-preserve=ownership", $srcDir . "/.", $dstDir . "/"]);
+    $n = 0;
+    foreach (Os.walk($srcDir) as $f) {
+        if (ends_with($f, ".zlbtpl") && Os.isFile($f)) {
+            $rel = substr($f, strlen($srcDir) + 1);
+            $dst = util.pjoin($dstDir, substr($rel, 0, strlen($rel) - 7));
+            $x->r->write($dst, render(Os.readFile($f), $x->c), Os.stat($f)["mode"] & 4095);
+            $x->r->run(["rm", "-f", "--", $dst . ".zlbtpl"]);
+            $n++;
+        }
+    }
+    return $n;
+}
+
+func chrootFiles($x) { return apply($x, $x->p["includes_chroot"], $x->rootfs()); }
+func isoFiles($x) { return apply($x, $x->p["includes_iso"], $x->isoroot()); }
