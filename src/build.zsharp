@@ -1,0 +1,179 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.runner;
+import Workspace.doctor;
+import Workspace.repos;
+import Workspace.packages;
+import Workspace.hooks;
+import Workspace.initsys;
+import Workspace.overlay;
+import Workspace.system;
+import Workspace.initrd;
+import Workspace.cleanup;
+import Workspace.image;
+import Workspace.outputs;
+
+##
+ * build — orkiestrator etapów. Każdy etap jest idempotentny względem znacznika w <work>/.state/; --resume pomija zakończone.
+ *
+ *   prepare → pre-bootstrap → repos → packages → post-bootstrap → after-packages → init → overlay → system
+ *   → hooks → initrd → cleanup → pre-image → image → post-image → finalize
+ * Bind-mounty API jądra w rootfs są aktywne od etapu packages do cleanup (włącznie) i zawsze zdejmowane (finally).
+##
+
+func stageNames() {
+    return ["prepare", "pre-bootstrap", "repos", "packages", "post-bootstrap", "after-packages", "init", "overlay", "system",
+        "hooks", "initrd", "cleanup", "pre-image", "image", "post-image", "finalize"];
+}
+
+func chrootStages() { return ["packages", "after-packages", "init", "overlay", "system", "hooks", "initrd", "cleanup"]; }
+
+func marker($x, $s) { return util.pjoin($x->p["state"], $s . ".done"); }
+func isDone($x, $s): bool { return !$x->r->dry && Os.isFile(marker($x, $s)); }
+func markDone($x, $s) {
+    $x->r->mkdir($x->p["state"]);
+    $x->r->write(marker($x, $s), strval(System.nowNanos()) . "\n");
+}
+
+func selectStages($opts) {
+    $all = stageNames();
+    $only = $opts["only"] ?? null;
+    if ($only !== null) {
+        if (!in_array($only, $all)) { util.die("nieznany etap: " . $only . " (zlb stages)"); }
+        return [$only];
+    }
+    $from = $opts["from"] ?? null;
+    $until = $opts["until"] ?? null;
+    foreach ([$from, $until] as $n) { if ($n !== null && !in_array($n, $all)) { util.die("nieznany etap: " . $n . " (zlb stages)"); } }
+    $out = [];
+    $on = $from === null;
+    foreach ($all as $s) {
+        if ($s === $from) { $on = true; }
+        if ($on) { $out[] = $s; }
+        if ($until !== null && $s === $until) { break; }
+    }
+    return $out;
+}
+
+class Session {
+    public $x;
+    public $mounts = null;
+    public function __construct($x) { $this->x = $x; }
+
+    public function mount() {
+        if ($this->mounts !== null) { return; }
+        $root = $this->x->rootfs();
+        $this->x->r->unmountTree($root);   # pozostałości po przerwanej budowie (kill -9) nie mogą się piętrzyć
+        $this->x->r->mkdir(util.pjoin($root, "etc"));
+        $this->mounts = (new ChrootMounts($this->x->r, $root))->mount();
+        $this->x->r->run(["cp", "-L", "/etc/resolv.conf", util.pjoin($root, "etc/resolv.conf")], ["ok" => true]);
+    }
+
+    public function unmount() {
+        if ($this->mounts === null) { return; }
+        $this->mounts->unmount();
+        $this->mounts = null;
+    }
+}
+
+func prepare($x, $opts) {
+    $resume = ($opts["resume"] ?? false) === true;
+    if (!$x->r->dry) {
+        $uid = trim(Process.run("id", ["-u"])["stdout"]);
+        if ($uid !== "0") { util.die("zlb build wymaga roota (chroot/mount/zypper --root). Użyj sudo albo kontenera --privileged."); }
+        if (($opts["no-check"] ?? false) !== true && doctor.report($x->c) > 0) { util.die("na hoście brakuje wymaganych narzędzi (zlb doctor)"); }
+    }
+    if (!$resume) {
+        # zdejmij pozostałe mounty z przerwanej budowy, zanim cokolwiek skasujemy
+        $x->r->unmountTree($x->rootfs());
+        $x->r->rmrf($x->rootfs());
+        $x->r->rmrf($x->isoroot());
+        $x->r->rmrf($x->p["state"]);
+    }
+    foreach ([$x->p["work_dir"], $x->rootfs(), $x->p["state"], $x->p["output_dir"], $x->p["cache_dir"]] as $d) { $x->r->mkdir($d); }
+    if (!$x->r->dry) { $x->r->logfile = $x->p["log"]; }
+    $e = packages.resolve($x);
+    util.info("pakiety: " . count($e["install"]) . ", wzorce: " . count($e["patterns"]) . ", blokady: " . count($e["lock"]) . ", do usunięcia: " . count($e["remove"]));
+}
+
+func runStage($x, $s, $opts) {
+    if ($s === "prepare") { prepare($x, $opts); }
+    elseif ($s === "pre-bootstrap") { hooks.runStage($x, "pre-bootstrap"); }
+    elseif ($s === "repos") { repos.setup($x); }
+    elseif ($s === "packages") { packages.install($x); packages.removeForced($x); }
+    elseif ($s === "post-bootstrap") { hooks.runStage($x, "post-bootstrap"); }
+    elseif ($s === "after-packages") { hooks.runStage($x, "after.packages"); }
+    elseif ($s === "init") { initsys.setup($x); }
+    elseif ($s === "overlay") { overlay.chrootFiles($x); }
+    elseif ($s === "system") { system.configure($x); }
+    elseif ($s === "hooks") { hooks.runStage($x, "chroot"); }
+    elseif ($s === "initrd") { if ($x->cfg("live.enabled") || in_array("iso", util.asList($x->cfg("build.formats")))) { initrd.build($x); } }
+    elseif ($s === "cleanup") { cleanup.run($x); }
+    elseif ($s === "pre-image") { hooks.runStage($x, "pre-image"); }
+    elseif ($s === "image") { image.exportAll($x); }
+    elseif ($s === "post-image") { hooks.runStage($x, "post-image"); }
+    elseif ($s === "finalize") { outputs.finalize($x, image.expected($x)); }
+}
+
+# jedna budowa naraz na katalog roboczy (plik z PID; martwy PID = blokada nieaktualna)
+func lockPath($x) { return util.pjoin($x->p["work_dir"], ".lock"); }
+
+# czy proces żyje i wygląda na zlb (zombie i ponownie użyty PID nie liczą się)
+func pidAlive($pid): bool {
+    if ($pid === "" || !Os.isDir("/proc/" . $pid)) { return false; }
+    try {
+        $st = File.read("/proc/" . $pid . "/stat");
+        $i = strlen($st) - 1;
+        while ($i > 0 && substr($st, $i, 1) !== ")") { $i--; }
+        if (substr($st, $i + 2, 1) === "Z") { return false; }
+        $cmd = File.read("/proc/" . $pid . "/cmdline");
+        return contains($cmd, "zlb") || contains($cmd, "zsc0") || contains($cmd, "main.zsharp");
+    } catch (Exception $e) { return false; }
+}
+
+func acquireLock($x) {
+    if ($x->r->dry) { return; }
+    Os.mkdir($x->p["work_dir"]);
+    $lp = lockPath($x);
+    if (Os.isFile($lp)) {
+        $pid = trim(Os.readFile($lp));
+        if (pidAlive($pid)) { util.die("w " . $x->p["work_dir"] . " trwa już budowa (pid " . $pid . "); jeśli to błąd, usuń " . $lp); }
+    }
+    Os.writeFile($lp, strval(System.pid()) . "\n");
+}
+
+func releaseLock($x) {
+    if ($x->r->dry) { return; }
+    $lp = lockPath($x);
+    if (Os.isFile($lp)) { File.delete($lp); }
+}
+
+func run($x, $opts = []) {
+    $sel = selectStages($opts);
+    acquireLock($x);
+    $resume = ($opts["resume"] ?? false) === true;
+    # jawny zakres (--from/--only) wymusza wykonanie etapów mimo znaczników .done
+    $explicit = ($opts["from"] ?? null) !== null || ($opts["only"] ?? null) !== null;
+    $sess = new Session($x);
+    $t0 = System.nowNanos();
+    try {
+        foreach ($sel as $s) {
+            if ($resume && $explicit === false && $s !== "prepare" && isDone($x, $s)) { util.info("pomijam (gotowe): " . $s); continue; }
+            if ($s === "image") { initrdKernelProbe($x); }
+            util.step("etap: " . $s);
+            if (in_array($s, chrootStages())) { $sess->mount(); }
+            elseif (in_array($s, ["pre-image", "image", "post-image", "finalize"])) { $sess->unmount(); }
+            runStage($x, $s, $opts);
+            markDone($x, $s);
+        }
+    } finally {
+        $sess->unmount();
+        releaseLock($x);
+    }
+    util.step("gotowe w " . intval((System.nowNanos() - $t0) / 1000000000) . " s");
+}
+
+# etapy image/finalize po wznowieniu potrzebują znać wersję jądra
+func initrdKernelProbe($x) {
+    if ($x->kver === "") { initrd.detectKernel($x); }
+}
