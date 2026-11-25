@@ -1,0 +1,99 @@
+import Std.Os;
+import Std.Path;
+import Workspace.util;
+
+##
+ * pkglist — parser packages/zlb.list.
+ *
+ *   # komentarz                      (też na końcu linii po spacji)
+ *   nazwa                            pakiet do instalacji
+ *   nazwa@repo                       pakiet z konkretnego repozytorium (alias z [repos])
+ *   @pattern:nazwa                   wzorzec zypper (pattern)
+ *   -nazwa                           blokada (zypper al): nigdy nie instaluj (dopuszczalne wildcards)
+ *   !nazwa                           po instalacji usuń z rpm --nodeps (gdy trafił jako zależność)
+ *   [arch=x86_64] nazwa              warunek; kilka po przecinku = AND; [arch!=aarch64] = negacja
+ *   [profile=live,tag=desktop] a b c wiele pakietów w jednej linii
+ *   %include inna.list               dołączenie (ścieżka względem bieżącego pliku, maks. głębokość 8)
+ * Klucze warunków: arch, profile, init, tag.
+##
+
+func condOk($cond, $ctx, $where) {
+    foreach (split($cond, ",") as $term) {
+        $t = trim($term);
+        if ($t === "") { continue; }
+        $neg = false;
+        $kv = split($t, "!=");
+        if (count($kv) === 2) { $neg = true; }
+        else { $kv = split($t, "="); }
+        if (count($kv) !== 2) { util.die($where . ": błędny warunek '" . $t . "'"); }
+        $key = trim($kv[0]); $want = trim($kv[1]);
+        $have = null;
+        if ($key === "tag") { $have = in_array($want, $ctx["tags"] ?? []) ? $want : null; }
+        elseif (in_array($key, ["arch", "profile", "init"])) { $have = $ctx[$key] ?? null; }
+        else { util.die($where . ": nieznany klucz warunku '" . $key . "' (arch, profile, init, tag)"); }
+        $match = $have === $want;
+        if ($neg) { $match = !$match; }
+        if (!$match) { return false; }
+    }
+    return true;
+}
+
+func emptyResult() { return ["install" => [], "patterns" => [], "lock" => [], "remove" => [], "from" => [], "files" => []]; }
+
+func parseInto($file, $ctx, $res, $depth) {
+    if ($depth > 8) { util.die($file . ": zbyt głębokie %include (pętla?)"); }
+    if (!Os.isFile($file)) { util.die("brak listy pakietów: " . $file); }
+    $res["files"][] = $file;
+    $n = 0;
+    foreach (Os.readLines($file) as $raw) {
+        $n++;
+        $where = $file . ":" . $n;
+        $l = util.stripComment($raw);
+        if ($l === "") { continue; }
+        if (starts_with($l, "[")) {
+            $end = index_of($l, "]");
+            if ($end < 0) { util.die($where . ": brak ']' w warunku"); }
+            $cond = substr($l, 1, $end - 1);
+            $l = trim(substr($l, $end + 1));
+            if (!condOk($cond, $ctx, $where)) { continue; }
+            if ($l === "") { util.die($where . ": warunek bez treści"); }
+        }
+        if (starts_with($l, "%include")) {
+            $arg = trim(substr($l, 8));
+            if ($arg === "") { util.die($where . ": %include bez ścieżki"); }
+            $res = parseInto(util.absPath($arg, Path.dirname($file)), $ctx, $res, $depth + 1);
+            continue;
+        }
+        if (starts_with($l, "%")) { util.die($where . ": nieznana dyrektywa '" . $l . "'"); }
+        foreach (split($l, " ") as $tok) {
+            if ($tok === "") { continue; }
+            if (starts_with($tok, "@pattern:")) { $res["patterns"][] = substr($tok, 9); }
+            elseif (starts_with($tok, "@")) { util.die($where . ": nieznany typ '" . $tok . "' (użyj @pattern:nazwa)"); }
+            elseif (starts_with($tok, "-")) { $res["lock"][] = substr($tok, 1); }
+            elseif (starts_with($tok, "!")) { $res["remove"][] = substr($tok, 1); }
+            elseif (contains($tok, "@")) {
+                $p = split($tok, "@");
+                if (count($p) !== 2 || $p[0] === "" || $p[1] === "") { util.die($where . ": błędne 'pakiet@repo': " . $tok); }
+                if (!has_key($res["from"], $p[1])) { $res["from"][$p[1]] = []; }
+                $res["from"][$p[1]][] = $p[0];
+            }
+            else { $res["install"][] = $tok; }
+        }
+    }
+    return $res;
+}
+
+##
+ * $ctx = ["arch" => .., "profile" => .., "init" => .., "tags" => [..]]
+##
+func parse($file, $ctx) {
+    $r = parseInto($file, $ctx, emptyResult(), 0);
+    $r["install"] = util.uniq($r["install"]);
+    $r["patterns"] = util.uniq($r["patterns"]);
+    $r["lock"] = util.uniq($r["lock"]);
+    $r["remove"] = util.uniq($r["remove"]);
+    $bad = [];
+    foreach ($r["install"] as $p) { if (in_array($p, $r["lock"])) { $bad[] = $p; } }
+    if (count($bad) > 0) { util.die("pakiety jednocześnie instalowane i blokowane: " . join($bad, ", ")); }
+    return $r;
+}
