@@ -1,0 +1,75 @@
+import Std.Os;
+import Workspace.util;
+import Workspace.pkglist;
+import Workspace.repos;
+
+##
+ * packages — instalacja pakietów do rootfs (zypper --root), blokady, usuwanie wymuszone, manifest zainstalowanych.
+##
+
+func resolve($x) {
+    $r = pkglist.parse($x->p["pkglist"], $x->pkgCtx());
+    $x->pkgs = $r;
+    if ($x->initSystem() === "custom") { $r["install"] = util.uniq([...$r["install"], ...util.asList($x->cfg("init.custom.packages"))]); $x->pkgs = $r; }
+    $extra = util.asList($x->cfg("packages.lock"));
+    $x->pkgs["lock"] = util.uniq([...$x->pkgs["lock"], ...$extra]);
+    $x->pkgs["remove"] = util.uniq([...$x->pkgs["remove"], ...util.asList($x->cfg("packages.remove_nodeps"))]);
+    return $x->pkgs;
+}
+
+func zypperInstall($x, $extra, $names) {
+    $a = [...repos.zypperBase($x), "install", "--auto-agree-with-licenses"];
+    $a[] = $x->cfg("packages.recommends") ? "--recommends" : "--no-recommends";
+    if ($x->cfg("packages.vendor_change")) { $a[] = "--allow-vendor-change"; }
+    if ($x->cfg("packages.download_in_advance")) { $a[] = "--download-in-advance"; }
+    $a = [...$a, ...$extra, ...$names];
+    $x->r->run($a);
+}
+
+func configureZypp($x) {
+    $root = $x->rootfs();
+    $x->r->mkdir(util.pjoin($root, "etc/zypp"));
+    $conf = "[main]\nsolver.onlyRequires = " . ($x->cfg("packages.recommends") ? "false" : "true") . "\n";
+    if ($x->cfg("packages.exclude_docs")) { $conf .= "rpm.install.excludedocs = yes\n"; }
+    $conf .= "multiversion =\n";
+    $x->r->write(util.pjoin($root, "etc/zypp/zypp.conf"), $conf, 420);
+}
+
+func install($x) {
+    $p = $x->pkgs === null ? resolve($x) : $x->pkgs;
+    if (count($p["install"]) + count($p["patterns"]) + count($p["from"]) === 0) { util.die("lista pakietów jest pusta: " . $x->p["pkglist"]); }
+    configureZypp($x);
+    $base = repos.zypperBase($x);
+    foreach ($p["lock"] as $l) { $x->r->run([...$base, "addlock", $l]); }
+    foreach ($p["patterns"] as $pat) { zypperInstall($x, ["-t", "pattern"], [$pat]); }
+    if (count($p["install"]) > 0) { zypperInstall($x, [], $p["install"]); }
+    foreach ($p["from"] as $repo => $names) { zypperInstall($x, ["--from", $repo], $names); }
+}
+
+# usuwa zainstalowane pakiety bez sprawdzania zależności (np. systemd) — tylko te, które faktycznie są w rootfs
+func forceRemove($x, $names) {
+    $root = $x->rootfs();
+    $present = [];
+    foreach ($names as $n) {
+        if ($x->r->ok(["rpm", "--root", $root, "-q", $n])) { $present[] = $n; }
+        else { util.debug("nie zainstalowany, pomijam usuwanie: " . $n); }
+    }
+    if (count($present) > 0) {
+        util.info("rpm -e --nodeps: " . join($present, " "));
+        $x->r->run(["rpm", "--root", $root, "-e", "--nodeps", ...$present]);
+        foreach ($present as $n) { $x->r->run([...repos.zypperBase($x), "addlock", $n], ["ok" => true]); }
+    }
+    return $present;
+}
+
+func removeForced($x) {
+    $p = $x->pkgs === null ? resolve($x) : $x->pkgs;
+    return forceRemove($x, $p["remove"]);
+}
+
+# manifest: "nazwa-wersja-wydanie.arch" jednym plikiem na wyjściu
+func manifest($x) {
+    $res = $x->r->capture(["rpm", "--root", $x->rootfs(), "-qa", "--qf", "%{NAME} %{VERSION}-%{RELEASE} %{ARCH}\\n"]);
+    $ls = util.lines($res["stdout"]);
+    return sort($ls);
+}
